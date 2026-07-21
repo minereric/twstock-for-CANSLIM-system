@@ -1,0 +1,6 @@
+{
+  "name": "台股智慧觀察與即時警報系統",
+  "description": "台灣熱門26檔股票觀察儀表板，具備即時價格模擬跳動、RSI/KD/MACD技術指標計算、自訂條件警示推播以及一鍵匯出至ChatGPT/Claude分析功能。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
