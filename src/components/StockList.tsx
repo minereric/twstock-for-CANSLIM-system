@@ -4,8 +4,9 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, TrendingUp, TrendingDown, Eye, Filter, Bell, AlertCircle, ShoppingCart } from 'lucide-react';
+import { Search, TrendingUp, TrendingDown, Eye, Filter, Bell, AlertCircle, ShoppingCart, Trash2, Plus, X, Edit2, Check } from 'lucide-react';
 import { Stock } from '../types';
+import StockSearchAutocomplete from './StockSearchAutocomplete';
 
 // Sparkline SVG Helper
 const Sparkline = ({ data }: { data: number[] }) => {
@@ -45,15 +46,28 @@ const StockRow = ({
   isSelected,
   onSelect,
   activeAlertsCount,
+  onRemove,
+  onUpdateStockName,
+  onResetStockName
 }: {
   stock: Stock;
   isSelected: boolean;
   onSelect: () => void;
   activeAlertsCount: number;
+  onRemove: () => void;
+  onUpdateStockName?: (id: string, newName: string) => void;
+  onResetStockName?: (id: string) => void;
   key?: React.Key;
 }) => {
   const [flash, setFlash] = useState<'up' | 'down' | null>(null);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [tempName, setTempName] = useState(stock.name);
   const prevPrice = useRef(stock.price);
+
+  useEffect(() => {
+    setTempName(stock.name);
+    setIsEditingName(false);
+  }, [stock.name, stock.id]);
 
   useEffect(() => {
     if (stock.price > prevPrice.current) {
@@ -101,16 +115,77 @@ const StockRow = ({
       {/* Code and Name with custom status dots */}
       <td className="py-3 px-4">
         <div className="flex items-center gap-2">
-          <span className={`w-1.5 h-1.5 rounded-full ${stock.shares > 0 ? 'bg-indigo-600 shadow-[0_0_6px_rgba(79,70,229,0.4)]' : 'bg-slate-300'}`} />
-          <div>
-            <div className="font-bold text-slate-900 flex items-center gap-1.5">
-              <span>{stock.name}</span>
-              {stock.shares > 0 && (
-                <span className="text-[9px] bg-indigo-50 text-indigo-600 border border-indigo-100 px-1.5 py-0.2 rounded font-black">
-                  已持
-                </span>
-              )}
-            </div>
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${stock.shares > 0 ? 'bg-indigo-600 shadow-[0_0_6px_rgba(79,70,229,0.4)]' : 'bg-slate-300'}`} />
+          <div className="min-w-0">
+            {isEditingName ? (
+              <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="text"
+                  value={tempName}
+                  onChange={(e) => setTempName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      if (onUpdateStockName && tempName.trim()) {
+                        onUpdateStockName(stock.id, tempName.trim());
+                      }
+                      setIsEditingName(false);
+                    } else if (e.key === 'Escape') {
+                      setTempName(stock.name);
+                      setIsEditingName(false);
+                    }
+                  }}
+                  className="bg-white border-2 border-indigo-500 rounded px-1.5 py-0.5 text-xs font-bold text-slate-800 outline-none w-28"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onUpdateStockName && tempName.trim()) {
+                      onUpdateStockName(stock.id, tempName.trim());
+                    }
+                    setIsEditingName(false);
+                  }}
+                  className="text-emerald-600 hover:bg-emerald-50 p-0.5 rounded cursor-pointer"
+                  title="儲存"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTempName(stock.name);
+                    setIsEditingName(false);
+                  }}
+                  className="text-slate-400 hover:bg-slate-100 p-0.5 rounded cursor-pointer"
+                  title="取消"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <div className="font-bold text-slate-900 flex items-center gap-1.5 group">
+                <span className="truncate">{stock.name}</span>
+                {stock.shares > 0 && (
+                  <span className="text-[9px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.2 rounded font-black shrink-0 font-mono" title={`庫存持股: ${stock.shares.toLocaleString()}股, 成本 NT$ ${stock.cost}`}>
+                    持股 {stock.shares >= 1000 ? `${(stock.shares / 1000).toFixed(0)}張` : `${stock.shares}股`}
+                  </span>
+                )}
+                {onUpdateStockName && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setTempName(stock.name);
+                      setIsEditingName(true);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-indigo-600 transition-opacity p-0.5 rounded cursor-pointer"
+                    title="修改股票名稱"
+                  >
+                    <Edit2 className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            )}
             <div className="text-[10px] text-slate-400 font-mono mt-0.5">{stock.id}</div>
           </div>
         </div>
@@ -130,6 +205,20 @@ const StockRow = ({
           <Sparkline data={stock.history} />
         </div>
       </td>
+
+      {/* Delete Action */}
+      <td className="py-3 px-4 text-center">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="text-slate-350 hover:text-rose-600 transition-colors p-1 rounded hover:bg-rose-50 cursor-pointer"
+          title="移除此觀察個股"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </td>
     </tr>
   );
 };
@@ -139,15 +228,19 @@ const StockCard = ({
   stock,
   isSelected,
   onSelect,
-  activeAlertsCount
+  activeAlertsCount,
+  onUpdateStockName
 }: {
   stock: Stock;
   isSelected: boolean;
   onSelect: () => void;
   activeAlertsCount: number;
+  onUpdateStockName?: (id: string, newName: string) => void;
   key?: React.Key;
 }) => {
   const isUp = stock.change >= 0;
+  const [isEditing, setIsEditing] = useState(false);
+  const [cardNameInput, setCardNameInput] = useState(stock.name);
 
   return (
     <div
@@ -162,14 +255,52 @@ const StockCard = ({
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${stock.shares > 0 ? 'bg-indigo-600 shadow-[0_0_6px_rgba(79,70,229,0.4)]' : 'bg-slate-300'}`} />
           <div>
-            <h3 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
-              {stock.name}
-              {stock.shares > 0 && (
-                <span className="text-[9px] bg-indigo-50 text-indigo-600 border border-indigo-100 px-1.5 rounded font-bold">
-                  已持
-                </span>
-              )}
-            </h3>
+            {isEditing ? (
+              <div className="flex items-center gap-1 my-1" onClick={e => e.stopPropagation()}>
+                <input
+                  type="text"
+                  value={cardNameInput}
+                  onChange={e => setCardNameInput(e.target.value)}
+                  className="bg-white border-2 border-indigo-500 rounded px-1.5 py-0.5 text-xs font-bold w-24 outline-none"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onUpdateStockName && cardNameInput.trim()) {
+                      onUpdateStockName(stock.id, cardNameInput.trim());
+                    }
+                    setIsEditing(false);
+                  }}
+                  className="text-emerald-600 p-0.5"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <h3 className="font-bold text-slate-900 text-sm flex items-center gap-1.5 group">
+                <span>{stock.name}</span>
+                {stock.shares > 0 && (
+                  <span className="text-[9px] bg-indigo-50 text-indigo-600 border border-indigo-100 px-1.5 rounded font-bold">
+                    已持
+                  </span>
+                )}
+                {onUpdateStockName && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCardNameInput(stock.name);
+                      setIsEditing(true);
+                    }}
+                    className="text-slate-400 hover:text-indigo-600 p-0.5 rounded cursor-pointer"
+                    title="修改名稱"
+                  >
+                    <Edit2 className="w-3 h-3" />
+                  </button>
+                )}
+              </h3>
+            )}
             <span className="text-[10px] text-slate-400 font-mono">{stock.id}</span>
           </div>
         </div>
@@ -224,93 +355,155 @@ interface StockListProps {
   selectedStockId: string;
   onSelectStock: (id: string) => void;
   rulesCountMap: Record<string, number>;
+  onAddStock: (id: string, name: string) => void;
+  onRemoveStock: (id: string) => void;
+  onUpdateStockName?: (id: string, newName: string) => void;
+  onResetStockName?: (id: string) => void;
 }
 
 export default function StockList({
   stocks,
   selectedStockId,
   onSelectStock,
-  rulesCountMap
+  rulesCountMap,
+  onAddStock,
+  onRemoveStock,
+  onUpdateStockName,
+  onResetStockName
 }: StockListProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'all' | 'owned' | 'watchlist' | 'overheat'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'watch_only' | 'etf_only' | 'owned_only'>('all');
+  const [newCode, setNewCode] = useState('');
+  const [newName, setNewName] = useState('');
+  const [isAddingOpen, setIsAddingOpen] = useState(false);
 
   // Filter stocks based on search and tab selections
   const filteredStocks = stocks.filter((stock) => {
+    const isObs = stock.isObserved !== false;
     const matchesSearch = 
       stock.name.includes(searchQuery) || 
       stock.id.includes(searchQuery);
 
     if (!matchesSearch) return false;
 
-    if (activeTab === 'owned') {
+    if (activeTab === 'owned_only') {
       return stock.shares > 0;
     }
-    if (activeTab === 'watchlist') {
-      return stock.shares === 0;
+    if (activeTab === 'etf_only') {
+      return stock.etfDetails !== undefined && isObs;
     }
-    if (activeTab === 'overheat') {
-      // Return stocks that are technically overbought, oversold, or have triggered alert configurations
-      return stock.indicators.rsi >= 70 || stock.indicators.rsi <= 30 || rulesCountMap[stock.id] > 0;
+    if (activeTab === 'watch_only') {
+      return stock.shares === 0 && stock.etfDetails === undefined && isObs;
     }
-    return true;
+    return isObs || stock.shares > 0;
   });
+
+  const handleAddSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCode.trim() || !newName.trim()) return;
+    onAddStock(newCode.trim(), newName.trim());
+    setNewCode('');
+    setNewName('');
+    setIsAddingOpen(false);
+  };
 
   return (
     <div className="bg-white border border-slate-200/80 rounded-2xl shadow-sm flex flex-col overflow-hidden">
       {/* Top action toolbar */}
       <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-base font-black text-slate-900 font-display">台股觀察雷達板 (26檔熱門)</h2>
-          <p className="text-xs text-slate-500">點擊個股可檢視 KD、RSI、MACD 趨勢圖與 CAN SLIM 操作建議</p>
+          <h2 className="text-base font-black text-slate-900 font-display">台股雷達板 ({stocks.filter(s => s.isObserved !== false).length}檔觀察)</h2>
+          <p className="text-xs text-slate-500">檢視技術指標診斷、CAN SLIM 綜合診斷與籌碼狀況概述</p>
         </div>
 
-        {/* Search */}
-        <div className="relative max-w-xs w-full">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="搜尋代號或名稱..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 text-slate-800 placeholder-slate-400 text-xs rounded-xl focus:outline-none focus:border-indigo-500 focus:bg-white transition-all font-medium"
+        {/* Search & Add Stock Autocomplete */}
+        <div className="flex gap-2 w-full md:w-80 shrink-0">
+          <StockSearchAutocomplete
+            observedIds={stocks.filter(s => s.isObserved !== false).map(s => s.id)}
+            onSelectStock={(id, name) => {
+              onAddStock(id, name);
+              onSelectStock(id);
+            }}
+            placeholder="搜尋代號或名稱 (如 2330, 台積電, 00940)..."
           />
+
+          <button
+            onClick={() => setIsAddingOpen(!isAddingOpen)}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-3 py-2 rounded-xl flex items-center gap-1 transition-all cursor-pointer shadow-sm shrink-0"
+          >
+            {isAddingOpen ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+            手動新增
+          </button>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="px-4 border-b border-slate-100 bg-slate-50 flex overflow-x-auto gap-2 py-2">
+      {/* Slide-out or Dropdown Stock Addition Form */}
+      {isAddingOpen && (
+        <form onSubmit={handleAddSubmit} className="bg-slate-50 p-4 border-b border-slate-100 flex flex-col sm:flex-row gap-3 items-end">
+          <div className="flex-1 space-y-1">
+            <label className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">代號 (例如：2454):</label>
+            <input
+              type="text"
+              required
+              placeholder="輸入股票代號..."
+              value={newCode}
+              onChange={(e) => setNewCode(e.target.value)}
+              className="w-full bg-white border border-slate-200 px-3 py-1.5 text-xs rounded-xl focus:outline-none focus:border-indigo-500 font-bold text-slate-700"
+            />
+          </div>
+          <div className="flex-1 space-y-1">
+            <label className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">名稱 (例如：聯發科):</label>
+            <input
+              type="text"
+              required
+              placeholder="輸入股票名稱..."
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              className="w-full bg-white border border-slate-200 px-3 py-1.5 text-xs rounded-xl focus:outline-none focus:border-indigo-500 font-bold text-slate-700"
+            />
+          </div>
+          <button
+            type="submit"
+            className="bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs px-4 py-2.5 rounded-xl transition-all cursor-pointer shrink-0"
+          >
+            確定新增
+          </button>
+        </form>
+      )}
+
+      {/* Filters (過濾器功能) */}
+      <div className="px-4 border-b border-slate-100 bg-slate-50 flex overflow-x-auto gap-2 py-2 text-xs font-bold">
         <button
           onClick={() => setActiveTab('all')}
-          className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
-            activeTab === 'all' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/10' : 'text-slate-500 hover:text-slate-800'
+          className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-all cursor-pointer ${
+            activeTab === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
           }`}
         >
-          全部標的 ({stocks.length})
+          (1) 全部顯示 ({stocks.filter(s => s.isObserved !== false || s.shares > 0).length})
         </button>
         <button
-          onClick={() => setActiveTab('owned')}
-          className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
-            activeTab === 'owned' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/10' : 'text-slate-500 hover:text-slate-800'
+          onClick={() => setActiveTab('watch_only')}
+          className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-all cursor-pointer ${
+            activeTab === 'watch_only' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
           }`}
         >
-          庫存持股 ({stocks.filter(s => s.shares > 0).length})
+          (2) 僅看觀察個股 ({stocks.filter(s => s.shares === 0 && s.etfDetails === undefined && s.isObserved !== false).length})
         </button>
         <button
-          onClick={() => setActiveTab('watchlist')}
-          className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
-            activeTab === 'watchlist' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/10' : 'text-slate-500 hover:text-slate-800'
+          onClick={() => setActiveTab('etf_only')}
+          className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-all cursor-pointer ${
+            activeTab === 'etf_only' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
           }`}
         >
-          潛在觀察 ({stocks.filter(s => s.shares === 0).length})
+          (3) 僅看 ETF ({stocks.filter(s => s.etfDetails !== undefined && s.isObserved !== false).length})
         </button>
         <button
-          onClick={() => setActiveTab('overheat')}
-          className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
-            activeTab === 'overheat' ? 'bg-indigo-600 text-white font-black shadow-sm shadow-indigo-600/10' : 'text-slate-500 hover:text-slate-800'
+          onClick={() => setActiveTab('owned_only')}
+          className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-all cursor-pointer ${
+            activeTab === 'owned_only' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
           }`}
         >
-          過熱/警示 ({stocks.filter(s => s.indicators.rsi >= 70 || s.indicators.rsi <= 30 || rulesCountMap[s.id] > 0).length})
+          (4) 僅看持有股 ({stocks.filter(s => s.shares > 0).length})
         </button>
       </div>
 
@@ -329,9 +522,10 @@ export default function StockList({
               <thead>
                 <tr className="border-b border-slate-100 text-slate-400 text-[10px] font-black uppercase tracking-wider bg-slate-50/50">
                   <th className="py-3 px-4">股名與代號</th>
-                  <th className="py-3 px-4 text-right">即時現價</th>
-                  <th className="py-3 px-4 text-right">單日漲跌 %</th>
-                  <th className="py-3 px-4 text-center">10日趨勢</th>
+                  <th className="py-3 px-4 text-right">即時股價</th>
+                  <th className="py-3 px-4 text-right">單日漲幅</th>
+                  <th className="py-3 px-4 text-center">10日趨勢縮圖</th>
+                  <th className="py-3 px-4 text-center">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -342,6 +536,9 @@ export default function StockList({
                     isSelected={stock.id === selectedStockId}
                     onSelect={() => onSelectStock(stock.id)}
                     activeAlertsCount={rulesCountMap[stock.id] || 0}
+                    onRemove={() => onRemoveStock(stock.id)}
+                    onUpdateStockName={onUpdateStockName}
+                    onResetStockName={onResetStockName}
                   />
                 ))}
               </tbody>
@@ -350,13 +547,25 @@ export default function StockList({
             {/* Mobile Card Grid View */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 md:hidden">
               {filteredStocks.map((stock) => (
-                <StockCard
-                  key={stock.id}
-                  stock={stock}
-                  isSelected={stock.id === selectedStockId}
-                  onSelect={() => onSelectStock(stock.id)}
-                  activeAlertsCount={rulesCountMap[stock.id] || 0}
-                />
+                <div key={stock.id} className="relative group">
+                  <StockCard
+                    stock={stock}
+                    isSelected={stock.id === selectedStockId}
+                    onSelect={() => onSelectStock(stock.id)}
+                    activeAlertsCount={rulesCountMap[stock.id] || 0}
+                    onUpdateStockName={onUpdateStockName}
+                  />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRemoveStock(stock.id);
+                    }}
+                    className="absolute top-2 right-2 text-slate-300 hover:text-rose-600 bg-white/80 p-1.5 rounded-full border border-slate-100 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shadow-xs"
+                    title="移除"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               ))}
             </div>
           </>

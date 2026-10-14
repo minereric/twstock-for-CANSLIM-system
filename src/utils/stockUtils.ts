@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Stock, Candle, StockIndicator, EtfDetails, EtfConstituent, EtfDividend } from '../types';
+import { Stock, Candle, StockIndicator, EtfDetails, EtfConstituent, EtfDividend, ChipStatus } from '../types';
 
 // Helper to generate mock historical candles for a stock
 export function generateHistoricalCandles(basePrice: number, count: number = 30): Candle[] {
@@ -263,6 +263,28 @@ export const ETF_METADATA: Record<string, {
       { exDate: '2025-09-18', amount: 0.54, yield: 2.1 }
     ]
   },
+  '00927': {
+    category: '半導體收益',
+    fundSize: 133,
+    shareholders: 85200,
+    distributionFreq: '季配',
+    annualizedYield: 7.45,
+    nextExDate: '2026-10-18',
+    nextAmount: 0.64,
+    constituents: [
+      { id: '2330', name: '台積電', weight: 15.2 },
+      { id: '2454', name: '聯發科', weight: 13.8 },
+      { id: '2379', name: '瑞昱', weight: 8.5 },
+      { id: '3034', name: '聯詠', weight: 7.6 },
+      { id: '3711', name: '日月光投控', weight: 6.9 }
+    ],
+    dividends: [
+      { exDate: '2026-10-18', amount: 0.64, yield: 1.6 },
+      { exDate: '2026-07-16', amount: 0.64, yield: 1.6 },
+      { exDate: '2026-04-18', amount: 0.58, yield: 1.5 },
+      { exDate: '2026-01-17', amount: 0.54, yield: 1.4 }
+    ]
+  },
   '00631L': {
     category: '槓桿型',
     fundSize: 165,
@@ -317,8 +339,38 @@ export const ETF_METADATA: Record<string, {
 };
 
 export function updateEtfDetails(stock: Stock, allStocks: { id: string; price: number; change: number }[]): Stock {
-  const meta = ETF_METADATA[stock.id];
-  if (!meta) return stock;
+  let meta = ETF_METADATA[stock.id];
+  
+  if (!meta) {
+    const isEtfPattern = stock.id.startsWith('00') || stock.id.includes('A') || stock.id.includes('L') || stock.id.includes('R');
+    if (isEtfPattern) {
+      let seed = 0;
+      for (let i = 0; i < stock.id.length; i++) seed += stock.id.charCodeAt(i);
+      
+      const isHighYield = seed % 2 === 0;
+      meta = {
+        category: isHighYield ? '高股息' : '市值型',
+        fundSize: 50 + (seed % 800),
+        shareholders: 15000 + (seed % 60000) * 8,
+        distributionFreq: isHighYield ? '季配' : '半年配',
+        annualizedYield: isHighYield ? Number((6.5 + (seed % 4) * 0.8).toFixed(2)) : Number((2.8 + (seed % 3) * 0.7).toFixed(2)),
+        nextExDate: '2026-08-15',
+        nextAmount: Number((0.25 + (seed % 5) * 0.15).toFixed(2)),
+        constituents: [
+          { id: '2330', name: '台積電', weight: isHighYield ? 4.2 : 46.5 },
+          { id: '2317', name: '鴻海', weight: isHighYield ? 3.9 : 8.8 },
+          { id: '2382', name: '廣達', weight: isHighYield ? 3.6 : 4.5 },
+          { id: '2303', name: '聯電', weight: isHighYield ? 3.4 : 3.8 },
+          { id: '2356', name: '英業達', weight: isHighYield ? 3.1 : 2.5 }
+        ],
+        dividends: [
+          { exDate: '2026-08-15', amount: Number((0.25 + (seed % 5) * 0.15).toFixed(2)), yield: 2.1 }
+        ]
+      };
+    } else {
+      return stock;
+    }
+  }
 
   let totalWeight = 0;
   let weightedChangeSum = 0;
@@ -379,6 +431,7 @@ export const getInitialStockData = (): Stock[] => {
     { id: '0056', name: '元大高股息', price: 38.00, shares: 0, cost: 0 },
     { id: '00919', name: '群益台灣精選高息', price: 25.00, shares: 0, cost: 0 },
     { id: '00878', name: '國泰永續高股息', price: 22.00, shares: 0, cost: 0 },
+    { id: '00927', name: '群益半導體收益', price: 19.50, shares: 0, cost: 0 },
   ];
 
   const basicStocks = defaultStocks.map(s => {
@@ -393,6 +446,7 @@ export const getInitialStockData = (): Stock[] => {
       change: Number(((Math.random() * 6 - 3)).toFixed(2)), // Random daily change
       prevClose: Number((s.price / (1 + (Math.random() * 0.04 - 0.02))).toFixed(2)),
       volume: Math.round(Math.random() * 80000 + 20000),
+      isObserved: true,
     };
   });
 
@@ -475,3 +529,110 @@ export function tickStockPrice(stock: Stock, marketTrend: number = 0): Stock {
     volume: stock.volume + Math.round(Math.random() * 5),
   };
 }
+
+export function getChipStatus(stockId: string, price: number): ChipStatus {
+  // Seed-based random generator to keep it relatively stable for the same stockId
+  let seed = 0;
+  for (let i = 0; i < stockId.length; i++) {
+    seed += stockId.charCodeAt(i);
+  }
+  const pseudoRandom = (offset: number) => {
+    const x = Math.sin(seed + offset) * 10000;
+    return x - Math.floor(x);
+  };
+
+  // Generate realistic values based on stockId
+  const isEtf = stockId.startsWith('00');
+  
+  // Custom branches based on stockId
+  let branches: string[] = ['元大總公司', '凱基台北', '美商高盛', '摩根大通', '富邦建國'];
+  if (seed % 3 === 1) {
+    branches = ['凱基台北', '元大大同', '美商高盛', '台灣摩根士丹利', '永豐金證券'];
+  } else if (seed % 3 === 2) {
+    branches = ['群益金鼎', '國泰敦南', '美商美林', '凱基板橋', '元富證券'];
+  }
+
+  const branchTransactions = branches.map((branch, idx) => {
+    const r1 = pseudoRandom(idx * 10);
+    const r2 = pseudoRandom(idx * 10 + 5);
+    const buyVol = Math.round(r1 * (isEtf ? 2000 : 5000) + 100);
+    const sellVol = Math.round(r2 * (isEtf ? 2000 : 5000) + 100);
+    return {
+      branch,
+      buyVol,
+      sellVol,
+      net: buyVol - sellVol
+    };
+  }).sort((a, b) => b.net - a.net);
+
+  // Financials
+  let revenueYoY = Number((pseudoRandom(20) * 40 - 10).toFixed(1)); // -10% to +30%
+  let grossMargin = Number((pseudoRandom(30) * 45 + 5).toFixed(1)); // 5% to 50%
+  let operatingMargin = Number((grossMargin * (0.3 + pseudoRandom(40) * 0.5)).toFixed(1));
+  let eps = Number((pseudoRandom(50) * 12 - 2).toFixed(2)); // -2 to +10
+  
+  if (stockId === '2330') { // TSMC
+    revenueYoY = 24.5;
+    grossMargin = 53.2;
+    operatingMargin = 42.1;
+    eps = 38.45;
+  } else if (stockId === '3293') { // 鈊象 (IGS)
+    revenueYoY = 28.6;
+    grossMargin = 96.2;
+    operatingMargin = 55.4;
+    eps = 58.20;
+  } else if (stockId === '2317') { // Foxconn
+    revenueYoY = 15.8;
+    grossMargin = 6.4;
+    operatingMargin = 2.8;
+    eps = 10.25;
+  } else if (stockId === '2382') { // Quanta
+    revenueYoY = 18.2;
+    grossMargin = 8.1;
+    operatingMargin = 4.0;
+    eps = 12.40;
+  } else if (isEtf) {
+    grossMargin = 0;
+    operatingMargin = 0;
+    eps = 0;
+  }
+
+  const peRatio = eps > 0 ? Number((price / eps).toFixed(1)) : 0;
+  const pbRatio = Number((1.2 + pseudoRandom(60) * 2.8).toFixed(2));
+
+  const mainForceBuy = Math.round((pseudoRandom(70) * 20000 - 8000) * (isEtf ? 0.3 : 1));
+  const foreignNetBuy = Math.round((pseudoRandom(80) * 15000 - 6000) * (isEtf ? 0.2 : 1));
+  const trustNetBuy = Math.round((pseudoRandom(90) * 10000 - 3000) * (isEtf ? 0.5 : 1));
+  const dealerNetBuy = Math.round(pseudoRandom(100) * 4000 - 2000);
+  
+  const concentration1d = Number((pseudoRandom(110) * 30 - 10).toFixed(2));
+  const concentration5d = Number((pseudoRandom(120) * 20 - 5).toFixed(2));
+  const concentration10d = Number((pseudoRandom(130) * 15 - 2).toFixed(2));
+
+  const marginBalanceChange = Math.round(pseudoRandom(140) * 4000 - 1800);
+  const shortBalanceChange = Math.round(pseudoRandom(150) * 800 - 350);
+  const bigPlayersRatio = Number((40 + pseudoRandom(160) * 45).toFixed(1)); // 40% to 85%
+
+  return {
+    concentration1d,
+    concentration5d,
+    concentration10d,
+    mainForceBuy,
+    marginBalanceChange,
+    shortBalanceChange,
+    foreignNetBuy,
+    trustNetBuy,
+    dealerNetBuy,
+    bigPlayersRatio,
+    branchTransactions,
+    financialSummary: {
+      revenueYoY,
+      grossMargin,
+      operatingMargin,
+      eps,
+      peRatio,
+      pbRatio
+    }
+  };
+}
+

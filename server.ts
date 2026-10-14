@@ -1,22 +1,18 @@
 import express from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 const WATCHED_SYMBOLS = [
   '00631L', '00632R', '00981A', '00991A', '2356', '2885', '3481', '1432',
   '2330', '2317', '2382', '2303', '6770', '2344', '2313', '1605', '2481',
   '3416', '3711', '2618', '2610', '2603', '2609', '2882', '2501', '0050',
-  '0056', '00919', '00878'
+  '0056', '00919', '00878', '00927'
 ];
 
 // In-memory cache
@@ -64,62 +60,10 @@ const DEFAULT_PRICES: Record<string, { price: number, name: string }> = {
   '0050': { price: 109.50, name: '元大台灣50' },
   '0056': { price: 38.00, name: '元大高股息' },
   '00919': { price: 25.00, name: '群益台灣精選高息' },
-  '00878': { price: 22.00, name: '國泰永續高股息' }
+  '00878': { price: 22.00, name: '國泰永續高股息' },
+  '00927': { price: 40.19, name: '群益半導體收益' },
+  '3293': { price: 801.00, name: '鈊象' }
 };
-
-// Concurrency-limited promise pool helper
-async function fetchInBatches<T, R>(
-  items: T[],
-  batchSize: number,
-  fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results: R[] = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize);
-    const batchResults = await Promise.all(
-      batch.map(item => fn(item).catch(err => {
-        console.error(`Error fetching item ${item}:`, err);
-        return null as unknown as R;
-      }))
-    );
-    results.push(...batchResults);
-    if (i + batchSize < items.length) {
-      await new Promise(resolve => setTimeout(resolve, 80)); // 80ms gap to avoid rate limit spikes
-    }
-  }
-  return results;
-}
-
-async function fetchFugleQuote(symbol: string, apiKey: string): Promise<CachedQuote> {
-  const url = `https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/${symbol}`;
-  const response = await globalThis.fetch(url, {
-    headers: {
-      "X-API-KEY": apiKey,
-      "User-Agent": "Mozilla/5.0 (NodeJS server-side)"
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Fugle API returned ${response.status} for ${symbol}`);
-  }
-
-  const data = (await response.json()) as any;
-  const rawPrice = data.lastPrice ?? data.referencePrice ?? data.previousClose;
-  if (typeof rawPrice !== 'number') {
-    throw new Error(`Fugle API did not return price for ${symbol}`);
-  }
-
-  return {
-    symbol,
-    price: rawPrice,
-    change: data.change ?? 0,
-    changePercent: data.changePercent ?? 0,
-    previousClose: data.previousClose ?? data.referencePrice ?? rawPrice,
-    volume: data.volume ?? Math.round(Math.random() * 80000 + 20000),
-    lastUpdated: data.lastUpdated,
-    timestamp: Date.now()
-  };
-}
 
 // Yahoo Finance Index translations and API fetch helper
 const INDEX_NAMES: Record<string, string> = {
@@ -196,6 +140,156 @@ async function fetchTwseQuotes(symbols: string[]): Promise<any[]> {
   return data?.msgArray || [];
 }
 
+async function fetchYahooHistory(symbol: string): Promise<any[]> {
+  const cleanSym = symbol.trim().toUpperCase();
+  const suffixes = ['.TW', '.TWO'];
+  const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+  for (const suffix of suffixes) {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(cleanSym + suffix)}?range=2mo&interval=1d`;
+      const response = await globalThis.fetch(url, {
+        headers: { "User-Agent": userAgent, "Accept": "application/json" }
+      });
+      if (!response.ok) continue;
+      const data = (await response.json()) as any;
+      const result = data?.chart?.result?.[0];
+      if (!result || !result.timestamp) continue;
+
+      const timestamps: number[] = result.timestamp;
+      const quote = result.indicators?.quote?.[0];
+      if (!quote || !quote.close) continue;
+
+      const candles: any[] = [];
+      for (let i = 0; i < timestamps.length; i++) {
+        const ts = timestamps[i];
+        const dateObj = new Date(ts * 1000);
+        const dateString = `${(dateObj.getMonth() + 1).toString().padStart(2, '0')}/${dateObj.getDate().toString().padStart(2, '0')}`;
+        
+        const close = quote.close?.[i];
+        const open = quote.open?.[i] ?? close;
+        const high = quote.high?.[i] ?? close;
+        const low = quote.low?.[i] ?? close;
+        const volume = quote.volume?.[i] ?? 10000;
+
+        if (close !== null && close !== undefined && !isNaN(close)) {
+          candles.push({
+            time: dateString,
+            open: Number(Number(open || close).toFixed(2)),
+            high: Number(Number(high || close).toFixed(2)),
+            low: Number(Number(low || close).toFixed(2)),
+            close: Number(Number(close).toFixed(2)),
+            volume: Math.round(volume || 10000)
+          });
+        }
+      }
+
+      if (candles.length > 0) {
+        return candles;
+      }
+    } catch (e) {
+      console.warn(`[Yahoo History] Failed for ${cleanSym}${suffix}:`, e);
+    }
+  }
+
+  return [];
+}
+
+interface EtfIndicatorItem {
+  id: string;
+  name: string;
+  price: number;
+  nav: number;
+  navSpread: number;
+  discountPremium: number;
+  prevNav: number;
+  navChange: number;
+  navChangePercent: number;
+  date: string;
+  time: string;
+  sourceUrl: string;
+}
+
+let cachedEtfIndicators: EtfIndicatorItem[] = [];
+let lastEtfIndicatorFetchTime = 0;
+const ETF_CACHE_TTL = 15 * 1000; // 15 seconds
+
+async function fetchTwseEtfIndicators(): Promise<EtfIndicatorItem[]> {
+  const now = Date.now();
+  if (cachedEtfIndicators.length > 0 && (now - lastEtfIndicatorFetchTime) < ETF_CACHE_TTL) {
+    return cachedEtfIndicators;
+  }
+
+  const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  try {
+    const response = await globalThis.fetch("https://mis.twse.com.tw/stock/data/all_etf.txt", {
+      headers: {
+        "User-Agent": userAgent,
+        "Referer": "https://mis.twse.com.tw/stock/various-areas/etf-price/indicator-disclosure-etf?lang=zhHant",
+        "Accept": "application/json"
+      }
+    });
+
+    if (response.ok) {
+      const data = await response.json() as any;
+      const list: EtfIndicatorItem[] = [];
+      const seen = new Set<string>();
+
+      for (const group of (data?.a1 || [])) {
+        for (const item of (group?.msgArray || [])) {
+          if (!item.a || seen.has(item.a)) continue;
+          seen.add(item.a);
+
+          const parseNum = (v: any) => {
+            if (v === undefined || v === null || v === '-' || v === '') return 0;
+            const cleanStr = String(v).replace(/,/g, '');
+            const n = Number(cleanStr);
+            return isNaN(n) ? 0 : n;
+          };
+
+          const price = parseNum(item.e);
+          const nav = parseNum(item.f);
+          const prevNav = parseNum(item.h);
+          const discountPremium = parseNum(item.g);
+          const navSpread = Number((price - nav).toFixed(2));
+          const navChange = Number((nav - prevNav).toFixed(2));
+          const navChangePercent = prevNav > 0 ? Number((((nav - prevNav) / prevNav) * 100).toFixed(2)) : 0;
+          
+          let cleanName = String(item.b || item.a).split('(')[0].trim();
+          if (cleanName.endsWith('證券投資信託基金')) {
+            cleanName = cleanName.replace('證券投資信託基金', '');
+          }
+
+          list.push({
+            id: String(item.a).trim(),
+            name: cleanName,
+            price,
+            nav,
+            navSpread,
+            discountPremium,
+            prevNav,
+            navChange,
+            navChangePercent,
+            date: String(item.i || ''),
+            time: String(item.j || ''),
+            sourceUrl: "https://mis.twse.com.tw/stock/various-areas/etf-price/indicator-disclosure-etf?lang=zhHant"
+          });
+        }
+      }
+
+      if (list.length > 0) {
+        cachedEtfIndicators = list;
+        lastEtfIndicatorFetchTime = now;
+        return list;
+      }
+    }
+  } catch (err) {
+    console.error('[TWSE ETF Indicators] Fetch failed:', err);
+  }
+
+  return cachedEtfIndicators;
+}
+
 // REST endpoint for stocks
 app.get('/api/stocks', async (req, res) => {
   const now = Date.now();
@@ -205,6 +299,17 @@ app.get('/api/stocks', async (req, res) => {
 
   const indexSymbols = ['^TWII', '^GSPC', '^IXIC', '^SOX', '^DJI'];
 
+  // Support user requested symbols via query parameter e.g. /api/stocks?symbols=2330,2454,00940
+  let requestedSymbols: string[] = [];
+  if (req.query.symbols) {
+    requestedSymbols = String(req.query.symbols)
+      .split(',')
+      .map(s => s.trim().toUpperCase())
+      .filter(s => s.length > 0 && /^[A-Z0-9.]+$/.test(s));
+  }
+
+  const allSymbols = Array.from(new Set([...WATCHED_SYMBOLS, ...requestedSymbols]));
+
   // Helper parser for TWSE real-time API values
   const parseVal = (v: any) => {
     if (v === undefined || v === null || v === '-' || v === '') return null;
@@ -213,10 +318,10 @@ app.get('/api/stocks', async (req, res) => {
   };
 
   // 1. Try fetching Taiwan Stocks and Taiwan Index via TWSE mis API first
-  console.log(`[TWSE API] Fetching live Taiwan quotes...`);
+  console.log(`[TWSE API] Fetching live Taiwan quotes for ${allSymbols.length} symbols...`);
   let twseSuccess = false;
   try {
-    const twseResults = await fetchTwseQuotes(WATCHED_SYMBOLS);
+    const twseResults = await fetchTwseQuotes(allSymbols);
     if (twseResults && twseResults.length > 0) {
       twseSuccess = true;
       sourceUsed = "TWSE Real-time API";
@@ -244,7 +349,7 @@ app.get('/api/stocks', async (req, res) => {
           };
         } else if (item.c) {
           const cleanSym = item.c;
-          if (WATCHED_SYMBOLS.includes(cleanSym)) {
+          if (allSymbols.includes(cleanSym)) {
             const zPrice = parseVal(item.z);
             const oPrice = parseVal(item.o);
             const yPrice = parseVal(item.y);
@@ -280,98 +385,81 @@ app.get('/api/stocks', async (req, res) => {
   }
 
   // 2. Fetch US/Global indices and fallback Taiwan quotes from Yahoo Finance
-  console.log(`[Yahoo Finance] Fetching US indices and backup quotes...`);
+  console.log(`[Yahoo Finance] Fetching US indices and quotes...`);
   try {
-    // If TWSE API was successful, we only need US indices. Otherwise, we fetch everything from Yahoo as backup.
-    const symbolsToFetchYahoo = twseSuccess 
-      ? ['^GSPC', '^IXIC', '^SOX', '^DJI'] 
-      : [
-          ...WATCHED_SYMBOLS.map(sym => `${sym}.TW`),
-          ...WATCHED_SYMBOLS.map(sym => `${sym}.TWO`),
-          ...indexSymbols
-        ];
+    const missingYahooSymbols = allSymbols.filter(sym => !yahooDataMap[sym]);
+    const symbolsToFetchYahoo = [
+      ...missingYahooSymbols.map(sym => `${sym}.TW`),
+      ...missingYahooSymbols.map(sym => `${sym}.TWO`),
+      ...indexSymbols
+    ];
 
-    const yahooResults = await fetchYahooQuotes(symbolsToFetchYahoo);
-    if (yahooResults && yahooResults.length > 0) {
-      if (!twseSuccess) {
-        sourceUsed = "Yahoo Finance API";
-      } else {
-        sourceUsed += " + Yahoo Finance Index";
-      }
-
-      yahooResults.forEach((item: any) => {
-        const fullSymbol = item.symbol;
-        
-        if (indexSymbols.includes(fullSymbol)) {
-          // Only overwrite if not already fetched (e.g. TWII can be fetched from TWSE)
-          if (!fetchedIndices[fullSymbol]) {
-            fetchedIndices[fullSymbol] = {
-              symbol: fullSymbol,
-              name: INDEX_NAMES[fullSymbol] || item.shortName || fullSymbol,
-              price: item.regularMarketPrice ?? 0,
-              change: item.regularMarketChange ?? 0,
-              changePercent: item.regularMarketChangePercent ?? 0,
-              prevClose: item.regularMarketPreviousClose ?? 0,
-              volume: item.regularMarketVolume ?? 0
-            };
-          }
+    if (symbolsToFetchYahoo.length > 0) {
+      const yahooResults = await fetchYahooQuotes(symbolsToFetchYahoo);
+      if (yahooResults && yahooResults.length > 0) {
+        if (!twseSuccess) {
+          sourceUsed = "Yahoo Finance API";
         } else {
-          // Only use Yahoo backup for stock if we didn't fetch it from TWSE API
-          const cleanSym = fullSymbol.replace('.TWO', '').replace('.TW', '');
-          if (!yahooDataMap[cleanSym] && WATCHED_SYMBOLS.includes(cleanSym)) {
-            const price = item.regularMarketPrice;
-            if (price && price > 0) {
-              yahooDataMap[cleanSym] = {
-                symbol: cleanSym,
-                price: price,
+          sourceUsed += " + Yahoo Finance";
+        }
+
+        yahooResults.forEach((item: any) => {
+          const fullSymbol = item.symbol;
+          
+          if (indexSymbols.includes(fullSymbol)) {
+            if (!fetchedIndices[fullSymbol]) {
+              fetchedIndices[fullSymbol] = {
+                symbol: fullSymbol,
+                name: INDEX_NAMES[fullSymbol] || item.shortName || fullSymbol,
+                price: item.regularMarketPrice ?? 0,
                 change: item.regularMarketChange ?? 0,
                 changePercent: item.regularMarketChangePercent ?? 0,
-                previousClose: item.regularMarketPreviousClose ?? price,
-                volume: item.regularMarketVolume ?? 0,
-                timestamp: now
+                prevClose: item.regularMarketPreviousClose ?? 0,
+                volume: item.regularMarketVolume ?? 0
               };
             }
+          } else {
+            const cleanSym = fullSymbol.replace('.TWO', '').replace('.TW', '');
+            if (!yahooDataMap[cleanSym] && allSymbols.includes(cleanSym)) {
+              const price = item.regularMarketPrice;
+              if (price && price > 0) {
+                yahooDataMap[cleanSym] = {
+                  symbol: cleanSym,
+                  price: price,
+                  change: item.regularMarketChange ?? 0,
+                  changePercent: item.regularMarketChangePercent ?? 0,
+                  previousClose: item.regularMarketPreviousClose ?? price,
+                  volume: item.regularMarketVolume ?? 0,
+                  timestamp: now
+                };
+              }
+            }
           }
-        }
-      });
+        });
+      }
     }
   } catch (err) {
     console.error('[Yahoo Finance] Failed to fetch quotes from Yahoo:', err);
   }
 
-  // 3. Fallback: Fugle API if key is present and we still have missing stock data
-  const apiKey = process.env.FUGLE_API_KEY;
-  const missingSymbols = WATCHED_SYMBOLS.filter(sym => !yahooDataMap[sym]);
-  if (missingSymbols.length > 0 && apiKey && apiKey.trim() !== '') {
-    console.log(`[Fugle API Fallback] Triggering Fugle API for ${missingSymbols.length} missing symbols...`);
-    try {
-      const results = await fetchInBatches(missingSymbols, 5, async (sym) => {
-        return fetchFugleQuote(sym, apiKey);
-      });
-      results.forEach((q) => {
-        if (q && q.symbol) {
-          yahooDataMap[q.symbol] = {
-            symbol: q.symbol,
-            price: q.price,
-            change: q.change,
-            changePercent: q.changePercent,
-            previousClose: q.previousClose,
-            volume: q.volume,
-            timestamp: now
-          };
-        }
-      });
-      sourceUsed = sourceUsed === "Simulated Local Data" ? "Fugle API" : sourceUsed + " + Fugle Fallback";
-    } catch (fErr) {
-      console.error('[Fugle API Fallback] Failed during batch fetch:', fErr);
-    }
+  // 3. Build final dataset combining fetched data and fallback defaults
+  const outputData: Record<string, any> = {};
+
+  // Fetch real-time TWSE ETF indicators if any ETF is in symbols
+  let twseEtfMap: Record<string, EtfIndicatorItem> = {};
+  try {
+    const etfIndicators = await fetchTwseEtfIndicators();
+    etfIndicators.forEach(item => {
+      twseEtfMap[item.id] = item;
+    });
+  } catch (err) {
+    console.warn('[TWSE ETF] Could not load indicators for /api/stocks:', err);
   }
 
-  // 4. Build final dataset combining fetched data and fallback defaults
-  const outputData: Record<string, any> = {};
-  WATCHED_SYMBOLS.forEach((sym) => {
+  allSymbols.forEach((sym) => {
     const fetched = yahooDataMap[sym];
     const defaultData = DEFAULT_PRICES[sym] || { price: 100, name: sym };
+    const etfInfo = twseEtfMap[sym];
     
     if (fetched) {
       outputData[sym] = {
@@ -380,7 +468,38 @@ app.get('/api/stocks', async (req, res) => {
         changePercent: fetched.changePercent,
         prevClose: fetched.previousClose,
         volume: fetched.volume,
-        isLive: true
+        isLive: true,
+        etfIndicator: etfInfo ? {
+          nav: etfInfo.nav,
+          discountPremium: etfInfo.discountPremium,
+          navSpread: etfInfo.navSpread,
+          prevNav: etfInfo.prevNav,
+          navChange: etfInfo.navChange,
+          navChangePercent: etfInfo.navChangePercent,
+          time: etfInfo.time
+        } : undefined
+      };
+    } else if (etfInfo && etfInfo.price > 0) {
+      // Direct live TWSE ETF quote
+      const prevClose = etfInfo.prevNav > 0 ? etfInfo.prevNav : etfInfo.price;
+      const change = Number((etfInfo.price - prevClose).toFixed(2));
+      const changePercent = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
+      outputData[sym] = {
+        price: etfInfo.price,
+        change,
+        changePercent,
+        prevClose,
+        volume: 35000,
+        isLive: true,
+        etfIndicator: {
+          nav: etfInfo.nav,
+          discountPremium: etfInfo.discountPremium,
+          navSpread: etfInfo.navSpread,
+          prevNav: etfInfo.prevNav,
+          navChange: etfInfo.navChange,
+          navChangePercent: etfInfo.navChangePercent,
+          time: etfInfo.time
+        }
       };
     } else {
       // Return simulated/fallback data
@@ -396,7 +515,16 @@ app.get('/api/stocks', async (req, res) => {
         changePercent: simulatedChangePercent,
         prevClose: simulatedPrevClose,
         volume: Math.round(Math.random() * 50000 + 15000),
-        isLive: false
+        isLive: false,
+        etfIndicator: etfInfo ? {
+          nav: etfInfo.nav,
+          discountPremium: etfInfo.discountPremium,
+          navSpread: etfInfo.navSpread,
+          prevNav: etfInfo.prevNav,
+          navChange: etfInfo.navChange,
+          navChangePercent: etfInfo.navChangePercent,
+          time: etfInfo.time
+        } : undefined
       };
     }
   });
@@ -437,6 +565,143 @@ app.get('/api/stocks', async (req, res) => {
     data: outputData,
     indices: fetchedIndices
   });
+});
+
+// Endpoint to fetch real-time ETF Net Asset Value (NAV) & Premium/Discount Indicators
+// Reference: https://mis.twse.com.tw/stock/various-areas/etf-price/indicator-disclosure-etf?lang=zhHant
+app.get('/api/etf/indicators', async (req, res) => {
+  try {
+    const list = await fetchTwseEtfIndicators();
+    res.json({
+      success: true,
+      source: 'https://mis.twse.com.tw/stock/various-areas/etf-price/indicator-disclosure-etf?lang=zhHant',
+      officialSite: 'https://mis.twse.com.tw/stock/various-areas/etf-price/indicator-disclosure-etf?lang=zhHant',
+      count: list.length,
+      timestamp: Date.now(),
+      data: list
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint to automatically fetch Chinese stock/ETF name and info
+app.get('/api/stock/:symbol/info', async (req, res) => {
+  const cleanSym = String(req.params.symbol).trim().toUpperCase();
+  if (!cleanSym) {
+    return res.status(400).json({ success: false, message: 'Invalid symbol' });
+  }
+
+  try {
+    // 1. Check TWSE ETF indicators (contains 350+ official ETF Chinese names)
+    const etfList = await fetchTwseEtfIndicators();
+    const etfMatch = etfList.find(e => e.id.toUpperCase() === cleanSym);
+    if (etfMatch) {
+      return res.json({
+        success: true,
+        id: cleanSym,
+        name: etfMatch.name,
+        fullName: etfMatch.name,
+        price: etfMatch.price,
+        prevClose: etfMatch.prevNav || etfMatch.price,
+        nav: etfMatch.nav,
+        discountPremium: etfMatch.discountPremium,
+        market: 'ETF',
+        isEtf: true,
+        source: 'TWSE Official ETF Indicator Disclosure'
+      });
+    }
+
+    // 2. Check TWSE official real-time stock info API
+    const twseQuotes = await fetchTwseQuotes([cleanSym]);
+    const quote = twseQuotes.find((m: any) => m.c?.toUpperCase() === cleanSym);
+    if (quote && (quote.n || quote.nf)) {
+      const name = quote.n ? quote.n.trim() : quote.nf.trim();
+      const zPrice = Number(quote.z) || Number(quote.y) || 0;
+      const yPrice = Number(quote.y) || zPrice;
+      return res.json({
+        success: true,
+        id: cleanSym,
+        name: name,
+        fullName: quote.nf ? quote.nf.trim() : name,
+        price: zPrice,
+        prevClose: yPrice,
+        market: quote.ex === 'otc' ? '上櫃' : '上市',
+        isEtf: cleanSym.startsWith('00'),
+        source: 'TWSE Official mis API'
+      });
+    }
+
+    // 3. Fallback to DEFAULT_PRICES
+    const defaultItem = DEFAULT_PRICES[cleanSym];
+    if (defaultItem) {
+      return res.json({
+        success: true,
+        id: cleanSym,
+        name: defaultItem.name,
+        price: defaultItem.price,
+        prevClose: defaultItem.price,
+        market: cleanSym.startsWith('00') ? 'ETF' : '上市',
+        isEtf: cleanSym.startsWith('00'),
+        source: 'Local Stock Database'
+      });
+    }
+
+    // 4. Fallback to Yahoo Quotes
+    const yQuotes = await fetchYahooQuotes([`${cleanSym}.TW`, `${cleanSym}.TWO`]);
+    if (yQuotes && yQuotes.length > 0) {
+      const y = yQuotes[0];
+      const yName = y.shortName || y.longName || cleanSym;
+      return res.json({
+        success: true,
+        id: cleanSym,
+        name: yName,
+        fullName: y.longName || yName,
+        price: y.regularMarketPrice || 0,
+        prevClose: y.regularMarketPreviousClose || 0,
+        market: y.symbol.endsWith('.TWO') ? '上櫃' : '上市',
+        isEtf: cleanSym.startsWith('00'),
+        source: 'Yahoo Finance'
+      });
+    }
+
+    return res.json({
+      success: true,
+      id: cleanSym,
+      name: `台股 ${cleanSym}`,
+      price: 100,
+      prevClose: 100,
+      market: cleanSym.startsWith('00') ? 'ETF' : '上市',
+      isEtf: cleanSym.startsWith('00'),
+      source: 'Default'
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint to fetch real historical K-lines for a stock
+app.get('/api/stock/:symbol/history', async (req, res) => {
+  const { symbol } = req.params;
+  try {
+    const candles = await fetchYahooHistory(symbol);
+    if (candles && candles.length > 0) {
+      return res.json({
+        success: true,
+        symbol: symbol.toUpperCase(),
+        source: 'Yahoo Finance History API',
+        candles
+      });
+    }
+    return res.json({
+      success: false,
+      symbol: symbol.toUpperCase(),
+      message: 'No history found from Yahoo Finance API',
+      candles: []
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 async function startServer() {

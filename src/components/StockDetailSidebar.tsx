@@ -5,32 +5,43 @@
 
 import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Sparkles, Edit2, Plus, Check, TrendingUp, TrendingDown, DollarSign, Activity, Info, BarChart2 } from 'lucide-react';
+import { Sparkles, Edit2, Plus, Check, TrendingUp, TrendingDown, DollarSign, Activity, Info, BarChart2, X } from 'lucide-react';
 import { Stock } from '../types';
 import { motion } from 'motion/react';
+import { getChipStatus } from '../utils/stockUtils';
 
 interface StockDetailSidebarProps {
   stock: Stock;
   stocks?: Stock[];
   onUpdatePortfolio: (id: string, shares: number, cost: number) => void;
+  onUpdateStockName?: (id: string, newName: string) => void;
+  onResetStockName?: (id: string) => void;
 }
 
 export default function StockDetailSidebar({
   stock,
   stocks = [],
-  onUpdatePortfolio
+  onUpdatePortfolio,
+  onUpdateStockName,
+  onResetStockName
 }: StockDetailSidebarProps) {
-  const [activeTab, setActiveTab] = useState<'ma' | 'kd_rsi' | 'macd' | 'etf'>('ma');
+  const [activeTab, setActiveTab] = useState<'ma' | 'kd_rsi' | 'macd' | 'etf' | 'chip'>('ma');
   const [isEditingHolding, setIsEditingHolding] = useState(false);
   const [sharesInput, setSharesInput] = useState(String(stock.shares));
   const [costInput, setCostInput] = useState(String(stock.cost));
+
+  // Custom name editing state
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [customNameInput, setCustomNameInput] = useState(stock.name);
 
   // Reset inputs when stock changes
   useEffect(() => {
     setSharesInput(String(stock.shares));
     setCostInput(String(stock.cost || stock.price.toFixed(2)));
     setIsEditingHolding(false);
-  }, [stock.id]);
+    setCustomNameInput(stock.name);
+    setIsEditingName(false);
+  }, [stock.id, stock.name]);
 
   const handleSaveHoldings = (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,6 +49,14 @@ export default function StockDetailSidebar({
     const costNum = parseFloat(costInput) || 0;
     onUpdatePortfolio(stock.id, sharesNum, costNum);
     setIsEditingHolding(false);
+  };
+
+  const handleSaveName = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (onUpdateStockName && customNameInput.trim()) {
+      onUpdateStockName(stock.id, customNameInput.trim());
+      setIsEditingName(false);
+    }
   };
 
   // 1. CAN SLIM breakouts & indicators rules-based diagnostics
@@ -65,6 +84,14 @@ export default function StockDetailSidebar({
       if (signal !== 'STRONG BUY') {
         signal = 'HOLD';
         signalColor = 'text-amber-700 bg-amber-50 border-amber-100 shadow-sm';
+      }
+    }
+
+    if (stock.id === '3293') {
+      bulletPoints.push("👑 遊戲股王與高獲利龍頭：鈊象具備卓越毛利率 (96%+) 與強勁海外授權權利金動能，高度符合 CAN SLIM 之高 EPS 成長 (C/A) 與市場領導者 (L) 準則。");
+      if (signal === 'NEUTRAL' || signal === 'HOLD') {
+        signal = 'BUY';
+        signalColor = 'text-teal-700 bg-teal-50 border-teal-100 shadow-sm';
       }
     }
 
@@ -275,6 +302,161 @@ export default function StockDetailSidebar({
       );
     }
 
+    if (activeTab === 'chip') {
+      const chip = getChipStatus(stock.id, stock.price);
+      const isEtf = stock.id.startsWith('00');
+      return (
+        <div className="space-y-3.5 text-slate-700">
+          {/* Concentration & Big Holders */}
+          <div className="grid grid-cols-2 gap-3.5">
+            <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-2.5">
+              <span className="text-[10px] text-slate-400 font-bold block mb-1">千張大戶持股比</span>
+              <div className="flex items-baseline gap-1">
+                <span className="text-sm font-black text-indigo-700 font-mono">{chip.bigPlayersRatio}%</span>
+                <span className="text-[9px] text-slate-400 font-medium">籌碼集中度</span>
+              </div>
+              <div className="w-full bg-slate-200 h-1 rounded-full mt-1.5 overflow-hidden">
+                <div className="bg-indigo-600 h-1 rounded-full" style={{ width: `${chip.bigPlayersRatio}%` }} />
+              </div>
+            </div>
+            <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-2.5">
+              <span className="text-[10px] text-slate-400 font-bold block mb-1">籌碼集中度</span>
+              <div className="text-[10px] space-y-0.5 font-mono">
+                <div className="flex justify-between">
+                  <span>1日集中度:</span>
+                  <span className={chip.concentration1d >= 0 ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
+                    {chip.concentration1d >= 0 ? '+' : ''}{chip.concentration1d}%
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>5日集中度:</span>
+                  <span className={chip.concentration5d >= 0 ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
+                    {chip.concentration5d >= 0 ? '+' : ''}{chip.concentration5d}%
+                  </span>
+                </div>
+                <div className="flex justify-between text-[9px] text-slate-400">
+                  <span>10日集中度:</span>
+                  <span>{chip.concentration10d >= 0 ? '+' : ''}{chip.concentration10d}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Institutional Net buys */}
+          <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-3.5">
+            <span className="text-[10px] text-slate-400 font-bold block mb-2">三大法人 & 主力買賣超 (張)</span>
+            <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-[11px] font-medium">
+              <div className="flex justify-between border-b border-slate-100 pb-1">
+                <span className="text-slate-500">主力買賣超:</span>
+                <span className={`font-mono font-bold ${chip.mainForceBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {chip.mainForceBuy >= 0 ? '+' : ''}{chip.mainForceBuy.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex justify-between border-b border-slate-100 pb-1">
+                <span className="text-slate-500">外資買賣超:</span>
+                <span className={`font-mono font-bold ${chip.foreignNetBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {chip.foreignNetBuy >= 0 ? '+' : ''}{chip.foreignNetBuy.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">投信買賣超:</span>
+                <span className={`font-mono font-bold ${chip.trustNetBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {chip.trustNetBuy >= 0 ? '+' : ''}{chip.trustNetBuy.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">自營商買賣超:</span>
+                <span className={`font-mono font-bold ${chip.dealerNetBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {chip.dealerNetBuy >= 0 ? '+' : ''}{chip.dealerNetBuy.toLocaleString()}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Margin Trading */}
+          <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-2.5 flex justify-between text-[11px] font-medium">
+            <div className="flex-1 flex justify-between pr-3 border-r border-slate-200/60">
+              <span className="text-slate-500">融資餘額變化:</span>
+              <span className={`font-mono font-bold ${chip.marginBalanceChange >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                {chip.marginBalanceChange >= 0 ? '+' : ''}{chip.marginBalanceChange.toLocaleString()} 張
+              </span>
+            </div>
+            <div className="flex-1 flex justify-between pl-3">
+              <span className="text-slate-500">融券餘額變化:</span>
+              <span className={`font-mono font-bold ${chip.shortBalanceChange >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                {chip.shortBalanceChange >= 0 ? '+' : ''}{chip.shortBalanceChange.toLocaleString()} 張
+              </span>
+            </div>
+          </div>
+
+          {/* Branch transactions */}
+          <div className="border border-slate-200/60 rounded-xl overflow-hidden text-[10px]">
+            <div className="bg-slate-100/80 px-2.5 py-1 border-b border-slate-200/60 flex justify-between items-center text-[10px] text-slate-500 font-bold">
+              <span>今日主力分點進出排行</span>
+              <span className="font-mono text-[9px]">NET</span>
+            </div>
+            <table className="w-full text-left border-collapse bg-white font-medium">
+              <thead>
+                <tr className="border-b border-slate-100 bg-slate-50 text-slate-400 font-bold">
+                  <th className="py-1 px-2.5">分點名稱</th>
+                  <th className="py-1 px-2 text-right">買張</th>
+                  <th className="py-1 px-2 text-right">賣張</th>
+                  <th className="py-1 px-2.5 text-right">買賣超</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-mono">
+                {chip.branchTransactions.map((bt, idx) => (
+                  <tr key={idx} className="hover:bg-slate-50/50">
+                    <td className="py-1 px-2.5 font-sans text-slate-700">{bt.branch}</td>
+                    <td className="py-1 px-2 text-right text-slate-500">{bt.buyVol}</td>
+                    <td className="py-1 px-2 text-right text-slate-500">{bt.sellVol}</td>
+                    <td className={`py-1 px-2.5 text-right font-bold ${bt.net >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {bt.net >= 0 ? '+' : ''}{bt.net}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Financial summary */}
+          {!isEtf && (
+            <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-3.5">
+              <span className="text-[10px] text-slate-400 font-bold block mb-2">財報摘要</span>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10.5px] font-medium font-mono">
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">營收年增率 (YoY):</span>
+                  <span className={chip.financialSummary.revenueYoY >= 0 ? 'text-emerald-600 font-bold' : 'text-rose-600'}>
+                    {chip.financialSummary.revenueYoY}%
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">每股盈餘 (EPS):</span>
+                  <span className="text-slate-800 font-bold">NT$ {chip.financialSummary.eps}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">毛利率:</span>
+                  <span className="text-slate-800 font-bold">{chip.financialSummary.grossMargin}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">本益比:</span>
+                  <span className="text-slate-800 font-bold">{chip.financialSummary.peRatio} 倍</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">營業利益率:</span>
+                  <span className="text-slate-800 font-bold">{chip.financialSummary.operatingMargin}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">股價淨值比:</span>
+                  <span className="text-slate-800 font-bold">{chip.financialSummary.pbRatio} 倍</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     return null;
   };
 
@@ -284,12 +466,69 @@ export default function StockDetailSidebar({
       {/* Header section */}
       <div className="flex items-start justify-between border-b border-slate-100 pb-3">
         <div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-sm font-black text-slate-950 font-display">{stock.name}</span>
-            <span className="text-[10px] font-mono text-slate-400 bg-slate-100 border border-slate-200/55 px-1.5 py-0.2 rounded font-bold">
-              {stock.id}
-            </span>
-          </div>
+          {isEditingName ? (
+            <form onSubmit={handleSaveName} className="flex flex-col gap-1.5 my-0.5">
+              <div className="flex items-center gap-1">
+                <input
+                  type="text"
+                  value={customNameInput}
+                  onChange={(e) => setCustomNameInput(e.target.value)}
+                  className="bg-slate-50 border-2 border-indigo-500 rounded-lg px-2 py-1 text-xs font-bold text-slate-800 outline-none w-36 shadow-xs"
+                  autoFocus
+                  placeholder="輸入自訂名稱"
+                />
+                <button
+                  type="submit"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white p-1 rounded-lg text-xs cursor-pointer shadow-xs"
+                  title="儲存名稱"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomNameInput(stock.name);
+                    setIsEditingName(false);
+                  }}
+                  className="bg-slate-200 hover:bg-slate-300 text-slate-600 p-1 rounded-lg text-xs cursor-pointer"
+                  title="取消"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              {onResetStockName && stock.customName && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onResetStockName(stock.id);
+                    setIsEditingName(false);
+                  }}
+                  className="text-[10px] text-indigo-600 hover:underline text-left cursor-pointer font-bold"
+                >
+                  還原官方名稱
+                </button>
+              )}
+            </form>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-black text-slate-950 font-display">{stock.name}</span>
+              <span className="text-[10px] font-mono text-slate-400 bg-slate-100 border border-slate-200/55 px-1.5 py-0.2 rounded font-bold">
+                {stock.id}
+              </span>
+              {onUpdateStockName && (
+                <button
+                  onClick={() => {
+                    setCustomNameInput(stock.name);
+                    setIsEditingName(true);
+                  }}
+                  className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-all cursor-pointer"
+                  title="修改股票/ETF自訂名稱"
+                >
+                  <Edit2 className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          )}
           <p className="text-[10px] text-slate-400 font-medium mt-0.5">即時技術診斷與大勢盤面</p>
         </div>
 
@@ -382,12 +621,20 @@ export default function StockDetailSidebar({
             <button
               onClick={() => setActiveTab('etf')}
               className={`flex-1 py-1 px-1.5 rounded-lg whitespace-nowrap text-center transition-all cursor-pointer ${
-                activeTab === 'etf' ? 'bg-indigo-600 text-white shadow-sm animate-pulse' : 'text-slate-500 hover:text-slate-800'
+                activeTab === 'etf' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
               ETF 折溢
             </button>
           )}
+          <button
+            onClick={() => setActiveTab('chip')}
+            className={`flex-1 py-1 px-1.5 rounded-lg whitespace-nowrap text-center transition-all cursor-pointer ${
+              activeTab === 'chip' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            籌碼狀況
+          </button>
         </div>
 
         {/* Interactive Diagnosis Output */}
