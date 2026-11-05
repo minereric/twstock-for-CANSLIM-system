@@ -18,9 +18,9 @@ export const useAuth = (): AuthContextValue => {
 
 /** 登出時清除瀏覽器上的本機暫存（若舊持股尚未搬進資料庫則保留，避免資料遺失） */
 const purgeLocalCache = () => {
-  if (localStorage.getItem('tw_stock_obs_dbsynced') === '1') {
-    localStorage.removeItem('tw_stock_obs_stocks');
-  }
+  try {
+    ['tw_stock_obs_stocks', 'tw_stock_obs_slim', 'tw_stock_obs_rules', 'tw_stock_obs_logs', 'tw_stock_obs_dbsynced'].forEach((k) => localStorage.removeItem(k));
+  } catch { /* ignore */ }
 };
 
 const friendlyError = (msg: string): string => {

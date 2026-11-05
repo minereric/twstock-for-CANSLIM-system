@@ -59,6 +59,7 @@ export interface EtfDetails {
   navChange?: number; // 淨值漲跌
   navChangePercent?: number; // 淨值漲跌幅 %
   navUpdateTime?: string; // 淨值計算/更新時間
+  kind?: 'standard' | 'leveraged' | 'inverse' | 'active'; // 官方揭示類型（依代號尾碼判斷）
 }
 
 export interface TwseEtfIndicator {
@@ -91,6 +92,9 @@ export interface Stock {
   indicators: StockIndicator;
   etfDetails?: EtfDetails;
   isObserved?: boolean;
+  isHolding?: boolean; // 是否在「庫存明細」(holdings 資料表有此列；股數 0 也算，除非按「移除」)
+  quoteStatus?: 'loading' | 'live' | 'stale' | 'error';
+  quoteAsOf?: string;
 }
 
 export type IndicatorType = 

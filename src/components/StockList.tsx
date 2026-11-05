@@ -7,11 +7,29 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Search, TrendingUp, TrendingDown, Eye, Filter, Bell, AlertCircle, ShoppingCart, Trash2, Plus, X, Edit2, Check } from 'lucide-react';
 import { Stock } from '../types';
 import StockSearchAutocomplete from './StockSearchAutocomplete';
+import { computeRisks, mergeTags, riskCount, worstLevel } from '../utils/riskEngine';
+import { getAllTags, getChipRows, getFundamental, getInstRows } from '../utils/officialStore';
+
+const fmtPrice = (s: Stock) => (s.price > 0 ? `NT$ ${s.price.toFixed(2)}` : '—');
+const fmtChg = (s: Stock) => (s.price > 0 ? `${s.change >= 0 ? '+' : ''}${s.change.toFixed(2)}%` : '—');
+
+// 風險徽章：只顯示「中／高」風險的項目數；資料不足不算風險
+const RiskBadge = ({ stock, version }: { stock: Stock; version: number }) => {
+  const info = React.useMemo(() => {
+    const tags = mergeTags(getAllTags()).filter((t) => t.stock_id === stock.id);
+    const alerts = computeRisks({ stockId: stock.id, candles: stock.candleHistory, fundamental: getFundamental(stock.id), chip: getChipRows(stock.id), inst: getInstRows(stock.id), tags });
+    return { n: riskCount(alerts), level: worstLevel(alerts), titles: alerts.filter((a) => a.level === 'high' || a.level === 'medium').map((a) => a.title).join('、') };
+  }, [stock.id, stock.candleHistory, version]);
+  if (info.n === 0) return null;
+  const cls = info.level === 'high' ? 'bg-rose-600 text-white' : 'bg-amber-500 text-white';
+  return <span title={info.titles} className={`text-[9px] font-black px-1.5 py-0.5 rounded shrink-0 ${cls}`}>⚠ {info.n}</span>;
+};
 
 // Sparkline SVG Helper
 const Sparkline = ({ data }: { data: number[] }) => {
-  if (data.length === 0) return null;
+  if (data.length === 0) return <span className="text-slate-300 text-xs">—</span>;
   const lastTen = data.slice(-12);
+  if (lastTen.length < 2) return <span className="text-slate-300 text-xs">—</span>;
   const min = Math.min(...lastTen);
   const max = Math.max(...lastTen);
   const range = max - min === 0 ? 1 : max - min;
@@ -48,8 +66,10 @@ const StockRow = ({
   activeAlertsCount,
   onRemove,
   onUpdateStockName,
-  onResetStockName
+  onResetStockName,
+  version
 }: {
+  version: number;
   stock: Stock;
   isSelected: boolean;
   onSelect: () => void;
@@ -165,6 +185,7 @@ const StockRow = ({
             ) : (
               <div className="font-bold text-slate-900 flex items-center gap-1.5 group">
                 <span className="truncate">{stock.name}</span>
+                <RiskBadge stock={stock} version={version} />
                 {stock.shares > 0 && (
                   <span className="text-[9px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.2 rounded font-black shrink-0 font-mono" title={`庫存持股: ${stock.shares.toLocaleString()}股, 成本 NT$ ${stock.cost}`}>
                     持股 {stock.shares >= 1000 ? `${(stock.shares / 1000).toFixed(0)}張` : `${stock.shares}股`}
@@ -193,10 +214,10 @@ const StockRow = ({
 
       {/* Price & Change */}
       <td className="py-3 px-4 font-mono font-bold text-right text-slate-900">
-        NT$ {stock.price.toFixed(2)}
+        {fmtPrice(stock)}
       </td>
       <td className={`py-3 px-4 font-mono font-bold text-right ${stock.change >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-        {stock.change >= 0 ? '+' : ''}{stock.change.toFixed(2)}%
+        {fmtChg(stock)}
       </td>
 
       {/* Real-time Sparkline */}
@@ -306,10 +327,10 @@ const StockCard = ({
         </div>
 
         <div className="text-right">
-          <p className="font-mono font-bold text-sm text-slate-900">NT$ {stock.price.toFixed(2)}</p>
+          <p className="font-mono font-bold text-sm text-slate-900">{fmtPrice(stock)}</p>
           <p className={`text-xs font-mono font-bold mt-0.5 flex items-center justify-end gap-0.5 ${isUp ? 'text-emerald-600' : 'text-rose-600'}`}>
             {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-            {isUp ? '+' : ''}{stock.change.toFixed(2)}%
+            {fmtChg(stock)}
           </p>
         </div>
       </div>
@@ -356,9 +377,12 @@ interface StockListProps {
   onSelectStock: (id: string) => void;
   rulesCountMap: Record<string, number>;
   onAddStock: (id: string, name: string) => void;
+  onBulkAdd?: (raw: string) => void;
   onRemoveStock: (id: string) => void;
   onUpdateStockName?: (id: string, newName: string) => void;
   onResetStockName?: (id: string) => void;
+  officialVersion?: number;
+  onSetTag?: unknown;
 }
 
 export default function StockList({
@@ -367,9 +391,11 @@ export default function StockList({
   onSelectStock,
   rulesCountMap,
   onAddStock,
+  onBulkAdd,
   onRemoveStock,
   onUpdateStockName,
-  onResetStockName
+  onResetStockName,
+  officialVersion = 0
 }: StockListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'all' | 'watch_only' | 'etf_only' | 'owned_only'>('all');
@@ -400,8 +426,10 @@ export default function StockList({
 
   const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newCode.trim() || !newName.trim()) return;
-    onAddStock(newCode.trim(), newName.trim());
+    if (!newCode.trim()) return;
+    const multi = /[\s,，、;；]/.test(newCode.trim());
+    if (multi && onBulkAdd) onBulkAdd(newCode);
+    else onAddStock(newCode.trim(), newName.trim()); // 名稱留空時由官方資料自動帶入
     setNewCode('');
     setNewName('');
     setIsAddingOpen(false);
@@ -441,7 +469,7 @@ export default function StockList({
       {isAddingOpen && (
         <form onSubmit={handleAddSubmit} className="bg-slate-50 p-4 border-b border-slate-100 flex flex-col sm:flex-row gap-3 items-end">
           <div className="flex-1 space-y-1">
-            <label className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">代號 (例如：2454):</label>
+            <label className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">代號（可一次輸入多檔，以空白或逗號分隔，如 2330 2317 00878）:</label>
             <input
               type="text"
               required
@@ -452,10 +480,9 @@ export default function StockList({
             />
           </div>
           <div className="flex-1 space-y-1">
-            <label className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">名稱 (例如：聯發科):</label>
+            <label className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">名稱（選填，留空自動帶入）:</label>
             <input
               type="text"
-              required
               placeholder="輸入股票名稱..."
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
@@ -539,6 +566,7 @@ export default function StockList({
                     onRemove={() => onRemoveStock(stock.id)}
                     onUpdateStockName={onUpdateStockName}
                     onResetStockName={onResetStockName}
+                    version={officialVersion}
                   />
                 ))}
               </tbody>

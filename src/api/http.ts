@@ -15,6 +15,8 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
 
   const headers = new Headers(init.headers);
   headers.set('Authorization', `Bearer ${session.access_token}`);
+  const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+  if (anon) headers.set('apikey', anon);
   const res = await fetch(input, { ...init, headers });
 
   if (res.status === 401 || res.status === 403) {

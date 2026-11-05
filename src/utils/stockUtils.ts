@@ -3,41 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Stock, Candle, StockIndicator, EtfDetails, EtfConstituent, EtfDividend, ChipStatus } from '../types';
+import { Stock, Candle, StockIndicator, EtfDetails, EtfConstituent, EtfDividend } from '../types';
+import { isEtfId } from './riskEngine';
 
 // Helper to generate mock historical candles for a stock
-export function generateHistoricalCandles(basePrice: number, count: number = 30): Candle[] {
-  const candles: Candle[] = [];
-  let currentPrice = basePrice * 0.9; // Start slightly lower to trend up
-  const now = new Date();
-
-  for (let i = count; i >= 1; i--) {
-    const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-    const dateString = date.toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' });
-    
-    const volatility = 0.02; // 2% daily volatility
-    const change = (Math.random() - 0.48) * volatility; // slight upward bias
-    const open = currentPrice;
-    const close = currentPrice * (1 + change);
-    const high = Math.max(open, close) * (1 + Math.random() * 0.01);
-    const low = Math.min(open, close) * (1 - Math.random() * 0.01);
-    const volume = Math.round((Math.random() * 5000 + 1000) * (basePrice > 500 ? 5 : 20));
-
-    candles.push({
-      time: dateString,
-      open: Number(open.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      low: Number(low.toFixed(2)),
-      close: Number(close.toFixed(2)),
-      volume,
-    });
-
-    currentPrice = close;
-  }
-  return candles;
-}
-
-// Calculate simple moving average
 export function calculateMA(prices: number[], period: number): number {
   if (prices.length < period) return prices[prices.length - 1] || 0;
   const slice = prices.slice(-period);
@@ -338,301 +307,137 @@ export const ETF_METADATA: Record<string, {
   }
 };
 
-export function updateEtfDetails(stock: Stock, allStocks: { id: string; price: number; change: number }[]): Stock {
-  let meta = ETF_METADATA[stock.id];
-  
-  if (!meta) {
-    const isEtfPattern = stock.id.startsWith('00') || stock.id.includes('A') || stock.id.includes('L') || stock.id.includes('R');
-    if (isEtfPattern) {
-      let seed = 0;
-      for (let i = 0; i < stock.id.length; i++) seed += stock.id.charCodeAt(i);
-      
-      const isHighYield = seed % 2 === 0;
-      meta = {
-        category: isHighYield ? '高股息' : '市值型',
-        fundSize: 50 + (seed % 800),
-        shareholders: 15000 + (seed % 60000) * 8,
-        distributionFreq: isHighYield ? '季配' : '半年配',
-        annualizedYield: isHighYield ? Number((6.5 + (seed % 4) * 0.8).toFixed(2)) : Number((2.8 + (seed % 3) * 0.7).toFixed(2)),
-        nextExDate: '2026-08-15',
-        nextAmount: Number((0.25 + (seed % 5) * 0.15).toFixed(2)),
-        constituents: [
-          { id: '2330', name: '台積電', weight: isHighYield ? 4.2 : 46.5 },
-          { id: '2317', name: '鴻海', weight: isHighYield ? 3.9 : 8.8 },
-          { id: '2382', name: '廣達', weight: isHighYield ? 3.6 : 4.5 },
-          { id: '2303', name: '聯電', weight: isHighYield ? 3.4 : 3.8 },
-          { id: '2356', name: '英業達', weight: isHighYield ? 3.1 : 2.5 }
-        ],
-        dividends: [
-          { exDate: '2026-08-15', amount: Number((0.25 + (seed % 5) * 0.15).toFixed(2)), yield: 2.1 }
-        ]
-      };
-    } else {
-      return stock;
-    }
-  }
+/** ETF 靜態參考資料（規模、配息、成分股為人工整理，非即時；淨值與折溢價一律使用官方即時揭示） */
+const EMPTY_ETF_META = {
+  category: 'ETF',
+  fundSize: 0,
+  shareholders: 0,
+  distributionFreq: '—',
+  annualizedYield: 0,
+  constituents: [] as EtfConstituent[],
+  dividends: [] as EtfDividend[],
+};
 
-  let totalWeight = 0;
-  let weightedChangeSum = 0;
-
-  meta.constituents.forEach(c => {
-    const matchingStock = allStocks.find(s => s.id === c.id);
-    const constituentChange = matchingStock ? matchingStock.change : stock.change;
-    weightedChangeSum += constituentChange * Math.abs(c.weight);
-    totalWeight += Math.abs(c.weight);
-  });
-
-  const avgConstituentsChange = totalWeight > 0 ? (weightedChangeSum / totalWeight) : stock.change;
-  const estimatedNav = Number((stock.prevClose * (1 + avgConstituentsChange / 100)).toFixed(2));
-  const discountPremium = Number((((stock.price - estimatedNav) / estimatedNav) * 100).toFixed(2));
-
+/**
+ * 套用 TWSE 官方 ETF「預估淨值」與「折溢價」：
+ *  折溢價(%) = (市價 − 預估淨值) ÷ 預估淨值 × 100；官方有揭示值時以官方為準。
+ * 沒有官方即時淨值時（例如休市前尚未揭示）estimatedNav = 0，畫面應顯示「—」而不是推算值。
+ */
+export function updateEtfDetails(stock: Stock, live?: EtfLive | null): Stock {
+  if (!isEtfId(stock.id)) return stock;
+  const meta = ETF_METADATA[stock.id] ?? EMPTY_ETF_META;
+  const prev = stock.etfDetails;
   return {
     ...stock,
     etfDetails: {
       ...meta,
-      estimatedNav,
-      discountPremium
-    }
+      ...(prev ? { navUpdateTime: prev.navUpdateTime, kind: prev.kind } : {}),
+      estimatedNav: live ? live.nav : prev?.estimatedNav ?? 0,
+      discountPremium: live ? live.discountPremium : prev?.discountPremium ?? 0,
+      navSpread: live ? live.navSpread : prev?.navSpread,
+      prevNav: live ? live.prevNav : prev?.prevNav,
+      navChange: live ? live.navChange : prev?.navChange,
+      navChangePercent: live ? live.navChangePercent : prev?.navChangePercent,
+      navUpdateTime: live ? `${live.date} ${live.time}` : prev?.navUpdateTime,
+      kind: live ? live.kind : prev?.kind,
+    },
   };
 }
 
-// 26 Initial stocks matching Taiwan market favourites and portfolio
-export const getInitialStockData = (): Stock[] => {
-  const defaultStocks = [
-    // --- Portfolio stocks (真實持股) ---
-    { id: '00631L', name: '元大台灣50正二', price: 38.16, shares: 0, cost: 0 },
-    { id: '00632R', name: '元大台灣50反一', price: 9.85, shares: 12000, cost: 12.77 },
-    { id: '00981A', name: '主動統一台股增長', price: 31.50, shares: 6000, cost: 30.21 },
-    { id: '00991A', name: '主動復華未來50', price: 21.06, shares: 6000, cost: 18.82 },
-    { id: '2356', name: '英業達', price: 67.50, shares: 3000, cost: 64.40 },
-    { id: '2885', name: '元大金', price: 66.70, shares: 144, cost: 60.00 },
-    { id: '3481', name: '群創', price: 66.50, shares: 2000, cost: 68.15 },
-    { id: '1432', name: '大魯閣', price: 15.65, shares: 1000, cost: 18.06 },
+export interface EtfLive {
+  kind: 'standard' | 'leveraged' | 'inverse' | 'active';
+  nav: number; prevNav: number; navChange: number; navChangePercent: number; navSpread: number; discountPremium: number; date: string; time: string;
+}
 
-    // --- Watches (熱門觀察標的, 股數 0 / 成本 0) ---
-    { id: '2330', name: '台積電', price: 2430.00, shares: 0, cost: 0 },
-    { id: '2317', name: '鴻海', price: 238.50, shares: 0, cost: 0 },
-    { id: '2382', name: '廣達', price: 372.50, shares: 0, cost: 0 },
-    { id: '2303', name: '聯電', price: 168.50, shares: 0, cost: 0 },
-    { id: '6770', name: '力積電', price: 75.10, shares: 0, cost: 0 },
-    { id: '2344', name: '華邦電', price: 192.00, shares: 0, cost: 0 },
-    { id: '2313', name: '華通', price: 226.00, shares: 0, cost: 0 },
-    { id: '1605', name: '華新', price: 35.00, shares: 0, cost: 0 },
-    { id: '2481', name: '強茂', price: 60.00, shares: 0, cost: 0 },
-    { id: '3416', name: '融程電', price: 130.00, shares: 0, cost: 0 },
-    { id: '3711', name: '日月光投控', price: 150.00, shares: 0, cost: 0 },
-    { id: '2618', name: '長榮航', price: 35.00, shares: 0, cost: 0 },
-    { id: '2610', name: '華航', price: 22.00, shares: 0, cost: 0 },
-    { id: '2603', name: '長榮', price: 200.00, shares: 0, cost: 0 },
-    { id: '2609', name: '陽明', price: 70.00, shares: 0, cost: 0 },
-    { id: '2882', name: '國泰金', price: 55.00, shares: 0, cost: 0 },
-    { id: '2501', name: '國建', price: 30.00, shares: 0, cost: 0 },
-    { id: '0050', name: '元大台灣50', price: 109.50, shares: 0, cost: 0 },
-    { id: '0056', name: '元大高股息', price: 38.00, shares: 0, cost: 0 },
-    { id: '00919', name: '群益台灣精選高息', price: 25.00, shares: 0, cost: 0 },
-    { id: '00878', name: '國泰永續高股息', price: 22.00, shares: 0, cost: 0 },
-    { id: '00927', name: '群益半導體收益', price: 19.50, shares: 0, cost: 0 },
-  ];
+/** 預設清單：僅在「資料庫完全沒有資料的新帳號」首次登入時匯入（之後一律以資料庫為準） */
+export const DEFAULT_PORTFOLIO: { id: string; name: string; shares: number; cost: number }[] = [
+  { id: '00631L', name: '元大台灣50正2', shares: 0, cost: 0 },
+  { id: '00632R', name: '元大台灣50反1', shares: 12000, cost: 12.77 },
+  { id: '00981A', name: '主動統一台股增長', shares: 6000, cost: 30.21 },
+  { id: '00991A', name: '主動復華未來50', shares: 6000, cost: 18.82 },
+  { id: '2356', name: '英業達', shares: 3000, cost: 64.4 },
+  { id: '2885', name: '元大金', shares: 144, cost: 60 },
+  { id: '3481', name: '群創', shares: 2000, cost: 68.15 },
+  { id: '1432', name: '大魯閣', shares: 1000, cost: 18.06 },
+  { id: '2330', name: '台積電', shares: 0, cost: 0 },
+  { id: '2317', name: '鴻海', shares: 0, cost: 0 },
+  { id: '2382', name: '廣達', shares: 0, cost: 0 },
+  { id: '2303', name: '聯電', shares: 0, cost: 0 },
+  { id: '6770', name: '力積電', shares: 0, cost: 0 },
+  { id: '2344', name: '華邦電', shares: 0, cost: 0 },
+  { id: '2313', name: '華通', shares: 0, cost: 0 },
+  { id: '1605', name: '華新', shares: 0, cost: 0 },
+  { id: '2481', name: '強茂', shares: 0, cost: 0 },
+  { id: '3416', name: '融程電', shares: 0, cost: 0 },
+  { id: '3711', name: '日月光投控', shares: 0, cost: 0 },
+  { id: '2618', name: '長榮航', shares: 0, cost: 0 },
+  { id: '2610', name: '華航', shares: 0, cost: 0 },
+  { id: '2603', name: '長榮', shares: 0, cost: 0 },
+  { id: '2609', name: '陽明', shares: 0, cost: 0 },
+  { id: '2882', name: '國泰金', shares: 0, cost: 0 },
+  { id: '2501', name: '國建', shares: 0, cost: 0 },
+  { id: '0050', name: '元大台灣50', shares: 0, cost: 0 },
+  { id: '0056', name: '元大高股息', shares: 0, cost: 0 },
+  { id: '00919', name: '群益台灣精選高息', shares: 0, cost: 0 },
+  { id: '00878', name: '國泰永續高股息', shares: 0, cost: 0 },
+  { id: '00927', name: '群益半導體收益', shares: 0, cost: 0 },
+];
 
-  const basicStocks = defaultStocks.map(s => {
-    const candleHistory = generateHistoricalCandles(s.price, 35);
-    const history = candleHistory.map(c => c.close);
-    const indicators = computeIndicators(candleHistory);
-    return {
-      ...s,
-      candleHistory,
-      history,
-      indicators,
-      change: Number(((Math.random() * 6 - 3)).toFixed(2)), // Random daily change
-      prevClose: Number((s.price / (1 + (Math.random() * 0.04 - 0.02))).toFixed(2)),
-      volume: Math.round(Math.random() * 80000 + 20000),
-      isObserved: true,
-    };
-  });
-
-  return basicStocks.map(s => updateEtfDetails(s, basicStocks));
+const ZERO_IND: StockIndicator = {
+  rsi: 0, kd: { k: 0, d: 0 }, macd: { dif: 0, dem: 0, hist: 0 }, ma: { ma5: 0, ma10: 0, ma20: 0 },
 };
 
-// Tick function to update price of a stock dynamically with a micro-trend
-export function tickStockPrice(stock: Stock, marketTrend: number = 0): Stock {
-  const currentPrice = stock.price;
-  
-  // High price stocks move in wider absolute tick values but same percent relative tick sizes
-  // Volatility is custom based on stock type:
-  // Leveraged/Inversed ETFs and penny/highly active stocks (e.g. 1432, 3481) are more volatile
-  let stockVolatility = 0.0015; // default 0.15% per tick
-  if (stock.id === '00632R' || stock.id === '1432' || stock.id === '3481') {
-    stockVolatility = 0.003;
-  } else if (stock.id.startsWith('00')) {
-    stockVolatility = 0.0006; // ETFs are more stable
-  }
-
-  // Taiwan stock pricing tick sizes rule:
-  // < 10: 0.01
-  // 10 ~ 50: 0.05
-  // 50 ~ 100: 0.1
-  // 100 ~ 500: 0.5
-  // 500 ~ 1000: 1.0
-  // >= 1000: 5.0
-  const getTaiwanTickSize = (price: number) => {
-    if (price < 10) return 0.01;
-    if (price < 50) return 0.05;
-    if (price < 100) return 0.1;
-    if (price < 500) return 0.5;
-    if (price < 1000) return 1.0;
-    return 5.0;
-  };
-
-  const tickSize = getTaiwanTickSize(currentPrice);
-  
-  // Determine move direction with a slight bias from the market trend and volatility
-  const bias = marketTrend * 0.2 + (Math.random() - 0.5);
-  const percentChange = bias * stockVolatility;
-  
-  let priceDelta = currentPrice * percentChange;
-  
-  // Snap priceDelta to the closest tick size multiple, keeping it at least 1 tick if randomized bias is strong
-  const ticks = Math.round(priceDelta / tickSize);
-  let nextPrice = currentPrice + (ticks !== 0 ? ticks * tickSize : (Math.random() > 0.5 ? tickSize : -tickSize));
-
-  // Make sure price is never 0 or negative
-  nextPrice = Math.max(tickSize, Number(nextPrice.toFixed(2)));
-
-  // Calculate new daily change percentage from original prevClose
-  const newChangePct = ((nextPrice - stock.prevClose) / stock.prevClose) * 100;
-  
-  // Update the latest candle (the current trading day)
-  const updatedCandles = [...stock.candleHistory];
-  if (updatedCandles.length > 0) {
-    const lastIndex = updatedCandles.length - 1;
-    const lastCandle = updatedCandles[lastIndex];
-    
-    updatedCandles[lastIndex] = {
-      ...lastCandle,
-      close: nextPrice,
-      high: Math.max(lastCandle.high, nextPrice),
-      low: Math.min(lastCandle.low, nextPrice),
-      volume: lastCandle.volume + Math.round(Math.random() * 150),
-    };
-  }
-
-  const updatedHistory = updatedCandles.map(c => c.close);
-  const updatedIndicators = computeIndicators(updatedCandles);
-
+/** 尚未取得報價／歷史資料時的空殼（價格為 0 代表「尚無資料」，畫面會顯示載入中而非假價格） */
+export function makeSkeletonStock(p: { id: string; name: string; shares?: number; cost?: number; isHolding?: boolean; isObserved?: boolean; customName?: string | null }): Stock {
   return {
-    ...stock,
-    price: nextPrice,
-    change: Number(newChangePct.toFixed(2)),
-    candleHistory: updatedCandles,
-    history: updatedHistory,
-    indicators: updatedIndicators,
-    volume: stock.volume + Math.round(Math.random() * 5),
+    id: p.id,
+    name: p.customName || p.name,
+    customName: p.customName || undefined,
+    price: 0,
+    change: 0,
+    prevClose: 0,
+    volume: 0,
+    history: [],
+    candleHistory: [],
+    shares: p.shares ?? 0,
+    cost: p.cost ?? 0,
+    indicators: ZERO_IND,
+    isObserved: p.isObserved ?? true,
+    isHolding: p.isHolding ?? false,
+    quoteStatus: 'loading',
   };
 }
 
-export function getChipStatus(stockId: string, price: number): ChipStatus {
-  // Seed-based random generator to keep it relatively stable for the same stockId
-  let seed = 0;
-  for (let i = 0; i < stockId.length; i++) {
-    seed += stockId.charCodeAt(i);
-  }
-  const pseudoRandom = (offset: number) => {
-    const x = Math.sin(seed + offset) * 10000;
-    return x - Math.floor(x);
-  };
-
-  // Generate realistic values based on stockId
-  const isEtf = stockId.startsWith('00');
-  
-  // Custom branches based on stockId
-  let branches: string[] = ['元大總公司', '凱基台北', '美商高盛', '摩根大通', '富邦建國'];
-  if (seed % 3 === 1) {
-    branches = ['凱基台北', '元大大同', '美商高盛', '台灣摩根士丹利', '永豐金證券'];
-  } else if (seed % 3 === 2) {
-    branches = ['群益金鼎', '國泰敦南', '美商美林', '凱基板橋', '元富證券'];
-  }
-
-  const branchTransactions = branches.map((branch, idx) => {
-    const r1 = pseudoRandom(idx * 10);
-    const r2 = pseudoRandom(idx * 10 + 5);
-    const buyVol = Math.round(r1 * (isEtf ? 2000 : 5000) + 100);
-    const sellVol = Math.round(r2 * (isEtf ? 2000 : 5000) + 100);
-    return {
-      branch,
-      buyVol,
-      sellVol,
-      net: buyVol - sellVol
-    };
-  }).sort((a, b) => b.net - a.net);
-
-  // Financials
-  let revenueYoY = Number((pseudoRandom(20) * 40 - 10).toFixed(1)); // -10% to +30%
-  let grossMargin = Number((pseudoRandom(30) * 45 + 5).toFixed(1)); // 5% to 50%
-  let operatingMargin = Number((grossMargin * (0.3 + pseudoRandom(40) * 0.5)).toFixed(1));
-  let eps = Number((pseudoRandom(50) * 12 - 2).toFixed(2)); // -2 to +10
-  
-  if (stockId === '2330') { // TSMC
-    revenueYoY = 24.5;
-    grossMargin = 53.2;
-    operatingMargin = 42.1;
-    eps = 38.45;
-  } else if (stockId === '3293') { // 鈊象 (IGS)
-    revenueYoY = 28.6;
-    grossMargin = 96.2;
-    operatingMargin = 55.4;
-    eps = 58.20;
-  } else if (stockId === '2317') { // Foxconn
-    revenueYoY = 15.8;
-    grossMargin = 6.4;
-    operatingMargin = 2.8;
-    eps = 10.25;
-  } else if (stockId === '2382') { // Quanta
-    revenueYoY = 18.2;
-    grossMargin = 8.1;
-    operatingMargin = 4.0;
-    eps = 12.40;
-  } else if (isEtf) {
-    grossMargin = 0;
-    operatingMargin = 0;
-    eps = 0;
-  }
-
-  const peRatio = eps > 0 ? Number((price / eps).toFixed(1)) : 0;
-  const pbRatio = Number((1.2 + pseudoRandom(60) * 2.8).toFixed(2));
-
-  const mainForceBuy = Math.round((pseudoRandom(70) * 20000 - 8000) * (isEtf ? 0.3 : 1));
-  const foreignNetBuy = Math.round((pseudoRandom(80) * 15000 - 6000) * (isEtf ? 0.2 : 1));
-  const trustNetBuy = Math.round((pseudoRandom(90) * 10000 - 3000) * (isEtf ? 0.5 : 1));
-  const dealerNetBuy = Math.round(pseudoRandom(100) * 4000 - 2000);
-  
-  const concentration1d = Number((pseudoRandom(110) * 30 - 10).toFixed(2));
-  const concentration5d = Number((pseudoRandom(120) * 20 - 5).toFixed(2));
-  const concentration10d = Number((pseudoRandom(130) * 15 - 2).toFixed(2));
-
-  const marginBalanceChange = Math.round(pseudoRandom(140) * 4000 - 1800);
-  const shortBalanceChange = Math.round(pseudoRandom(150) * 800 - 350);
-  const bigPlayersRatio = Number((40 + pseudoRandom(160) * 45).toFixed(1)); // 40% to 85%
-
-  return {
-    concentration1d,
-    concentration5d,
-    concentration10d,
-    mainForceBuy,
-    marginBalanceChange,
-    shortBalanceChange,
-    foreignNetBuy,
-    trustNetBuy,
-    dealerNetBuy,
-    bigPlayersRatio,
-    branchTransactions,
-    financialSummary: {
-      revenueYoY,
-      grossMargin,
-      operatingMargin,
-      eps,
-      peRatio,
-      pbRatio
+/** 把即時報價合併進最新一根日 K（同一天更新，新的一天則新增），並重算指標；不產生任何隨機值 */
+export function applyQuote(s: Stock, q: { price: number; changePercent: number; prevClose: number; volume: number; open?: number; high?: number; low?: number; isLive: boolean; asOf?: string; etf?: EtfLive }): Stock {
+  if (!(q.price > 0)) return { ...s, quoteStatus: s.price > 0 ? 'stale' : 'error' };
+  let candles = s.candleHistory;
+  if (candles.length > 0) {
+    const day = (q.asOf ?? '').slice(0, 10);
+    const last = candles[candles.length - 1];
+    candles = candles.slice();
+    if (day && day === last.time) {
+      candles[candles.length - 1] = {
+        ...last, close: q.price,
+        high: Math.max(last.high, q.high ?? q.price, q.price),
+        low: Math.min(last.low, q.low ?? q.price, q.price),
+        volume: q.volume > 0 ? q.volume : last.volume,
+      };
+    } else if (day && day > last.time) {
+      candles.push({ time: day, open: q.open ?? q.price, high: Math.max(q.high ?? q.price, q.price), low: Math.min(q.low ?? q.price, q.price), close: q.price, volume: q.volume });
     }
+  }
+  const next: Stock = {
+    ...s,
+    price: q.price,
+    change: q.changePercent,
+    prevClose: q.prevClose,
+    volume: q.volume,
+    candleHistory: candles,
+    history: candles.map((c) => c.close),
+    indicators: candles.length > 0 ? computeIndicators(candles) : s.indicators,
+    quoteStatus: q.isLive ? 'live' : 'stale',
+    quoteAsOf: q.asOf,
   };
+  return updateEtfDetails(next, q.etf ?? null);
 }
-
