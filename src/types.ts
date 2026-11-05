@@ -212,18 +212,20 @@ export interface StockStrategy3Period {
 export type ValuationModelType = 'CAN_SLIM' | 'CYCLE' | 'FINANCIAL' | 'ETF_ALLOCATION';
 
 export interface CanSlimDetails {
-  cScore: number; // Current quarterly earnings
-  aScore: number; // Annual earnings
-  nScore: number; // New product/management/high
-  sScore: number; // Supply & Demand / volume
-  lScore: number; // Leader or Laggard
-  iScore: number; // Institutional sponsorship
-  mScore: number; // Market direction
-  totalScore: number; // 0 ~ 100
+  cScore: number | null; // Current quarterly earnings（null = 無資料）
+  aScore: number | null; // Annual earnings
+  nScore: number | null; // New high
+  sScore: number | null; // Supply & Demand / volume
+  lScore: number | null; // Leader or Laggard
+  iScore: number | null; // Institutional sponsorship
+  mScore: number | null; // Market direction
+  totalScore: number; // 0 ~ 100（僅計入有資料的項目）
+  coverage: number; // 有資料的項目數（0~7）
+  notes?: Partial<Record<'c' | 'a' | 'n' | 's' | 'l' | 'i' | 'm', string>>;
   leaderStatus: 'LEADER' | 'LAGGARD' | 'EMERGING';
-  rs5d: number;
-  rs20d: number;
-  rs60d: number;
+  rs5d: number | null;
+  rs20d: number | null;
+  rs60d: number | null;
   modelType: ValuationModelType;
 }
 

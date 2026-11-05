@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { computeCanSlim } from './canslim';
+import { getFundamental, getInstRows, getChipRows, getMarketCandles } from './officialStore';
+const nz = (v: number | null | undefined) => (v === null || v === undefined ? '—' : String(v));
 import { Stock, MarketState, GlobalIndex, SectorRotationItem, CycleRadarItem, RecentNewsItem, StockPriceMap, StockStrategy3Period, CanSlimDetails, ValuationModelType } from '../types';
 
 // ==========================================
@@ -122,57 +125,20 @@ export function calculateRelativeStrength(stockCandles: any[], marketCandles?: a
 
 export function computeCanSlimScores(stock: Stock, marketState: MarketState): CanSlimDetails {
   const meta = STOCK_META_DICTIONARY[stock.id] || { name: stock.name, sector: '一般電子', model: 'CAN_SLIM' };
-  const rs = calculateRelativeStrength(stock.candleHistory);
-  
-  const isLeader = rs.rs20d >= 78;
-  const isLaggard = rs.rs20d < 60;
-  const leaderStatus = isLeader ? 'LEADER' : (isLaggard ? 'LAGGARD' : 'EMERGING');
-
-  // Specific scoring based on fundamentals & technicals
-  let cScore = 80;
-  let aScore = 82;
-  let nScore = 85;
-  let sScore = 78;
-  let lScore = rs.rs20d;
-  let iScore = 82;
-  let mScore = marketState.changePercent >= 0 ? 85 : 65;
-
-  if (stock.id === '2330') {
-    cScore = 95; aScore = 96; nScore = 98; sScore = 90; lScore = 96; iScore = 95;
-  } else if (stock.id === '2317' || stock.id === '2382') {
-    cScore = 88; aScore = 90; nScore = 92; sScore = 85; lScore = 88; iScore = 88;
-  } else if (stock.id === '2603' || stock.id === '2609') {
-    cScore = 85; aScore = 80; nScore = 86; sScore = 88; lScore = 85; iScore = 84;
-  } else if (stock.id === '2344' || stock.id === '3481') {
-    cScore = 72; aScore = 68; nScore = 78; sScore = 75; lScore = 70; iScore = 72;
-  } else if (stock.id === '00632R') {
-    cScore = 50; aScore = 45; nScore = 60; sScore = 70; lScore = 40; iScore = 65; mScore = 40;
-  }
-
-  const totalScore = Math.round(
-    cScore * 0.20 +
-    aScore * 0.15 +
-    nScore * 0.15 +
-    sScore * 0.15 +
-    lScore * 0.15 +
-    iScore * 0.10 +
-    mScore * 0.10
-  );
-
+  const r = computeCanSlim({
+    stockId: stock.id,
+    candles: stock.candleHistory,
+    fundamental: getFundamental(stock.id),
+    inst: getInstRows(stock.id),
+    chip: getChipRows(stock.id),
+    marketCandles: getMarketCandles(),
+  });
   return {
-    cScore,
-    aScore,
-    nScore,
-    sScore,
-    lScore,
-    iScore,
-    mScore,
-    totalScore,
-    leaderStatus,
-    rs5d: rs.rs5d,
-    rs20d: rs.rs20d,
-    rs60d: rs.rs60d,
-    modelType: meta.model
+    cScore: r.c, aScore: r.a, nScore: r.n, sScore: r.s, lScore: r.l, iScore: r.i, mScore: r.m,
+    totalScore: r.total, coverage: r.coverage, notes: r.notes,
+    leaderStatus: r.leaderStatus,
+    rs5d: r.rs5d, rs20d: r.rs20d, rs60d: r.rs60d,
+    modelType: meta.model,
   };
 }
 
@@ -604,7 +570,7 @@ ${cycleRadars.map(c => `
 
 ### 六、🔥 今日 Leader (相對強度領頭羊)
 ${leaders.slice(0, 4).map(s => `
-* **${s.name} (${s.id})** — 總分: **${s.canSlim.totalScore}分** (20D RS: **${s.canSlim.rs20d}**)
+* **${s.name} (${s.id})** — 總分: **${s.canSlim.totalScore}分** (20D RS: **${nz(s.canSlim.rs20d)}**)
   * **所屬板塊**: ${STOCK_META_DICTIONARY[s.id]?.sector || '科技'}
   * **領先特徵**: CAN SLIM 評分頂尖，突破型放量上攻，為所屬族群最具定價權龍頭。
 `).join('\n')}
@@ -614,7 +580,7 @@ ${leaders.slice(0, 4).map(s => `
 ### 七、📈 核心標的 CAN SLIM / 景氣循環綜合排行
 | 代碼 | 名稱 | 適用模型 | C | A | N | S | L | I | M | 總分 | 領先/落後狀態 | 5D/20D RS |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-${enrichedStocks.slice(0, 15).map(s => `| **${s.id}** | ${s.name} | \`${s.canSlim.modelType}\` | ${s.canSlim.cScore} | ${s.canSlim.aScore} | ${s.canSlim.nScore} | ${s.canSlim.sScore} | ${s.canSlim.lScore} | ${s.canSlim.iScore} | ${s.canSlim.mScore} | **${s.canSlim.totalScore}** | ${s.canSlim.leaderStatus === 'LEADER' ? '👑 Leader' : (s.canSlim.leaderStatus === 'LAGGARD' ? '⚠️ Laggard' : '🔹 潛在股')} | ${s.canSlim.rs5d}/${s.canSlim.rs20d} |`).join('\n')}
+${enrichedStocks.slice(0, 15).map(s => `| **${s.id}** | ${s.name} | \`${s.canSlim.modelType}\` | ${nz(s.canSlim.cScore)} | ${nz(s.canSlim.aScore)} | ${nz(s.canSlim.nScore)} | ${nz(s.canSlim.sScore)} | ${nz(s.canSlim.lScore)} | ${nz(s.canSlim.iScore)} | ${nz(s.canSlim.mScore)} | **${s.canSlim.totalScore}**（${s.canSlim.coverage}/7項有資料） | ${s.canSlim.leaderStatus === 'LEADER' ? '👑 Leader' : (s.canSlim.leaderStatus === 'LAGGARD' ? '⚠️ Laggard' : '🔹 潛在股')} | ${nz(s.canSlim.rs5d)}/${nz(s.canSlim.rs20d)} |`).join('\n')}
 
 ---
 
