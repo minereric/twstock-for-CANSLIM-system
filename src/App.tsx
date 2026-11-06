@@ -12,8 +12,9 @@ import StockDetailSidebar from './components/StockDetailSidebar';
 import AlertManager from './components/AlertManager';
 import ReportGenerator from './components/ReportGenerator';
 import NotificationCenter, { playAlertSound, triggerBrowserNotification } from './components/NotificationCenter';
-import { Sparkles, TrendingUp, TrendingDown, ArrowUpRight, Zap, Bell, Check, Info, Activity, LayoutDashboard, Briefcase, Trash2, Edit3, Save, Search, Plus, X, ChevronRight, CheckCircle2, RotateCcw } from 'lucide-react';
+import { Sparkles, TrendingUp, TrendingDown, ArrowUpRight, Zap, Bell, Check, Info, Activity, LayoutDashboard, Briefcase, Trash2, Edit3, Save, Search, Plus, X, ChevronRight, CheckCircle2, RotateCcw, PiggyBank } from 'lucide-react';
 import EtfAnalysis from './components/EtfAnalysis';
+import DcaPlanner from './components/DcaPlanner';
 import { TAIWAN_STOCKS_DATABASE, searchTaiwanStocks } from './data/taiwanStocks';
 
 import { generateV32MasterPromptWithJson } from './utils/aiDecisionEngine';
@@ -520,7 +521,7 @@ export default function App() {
     document.body.removeChild(textarea);
   };
 
-  const [currentView, setCurrentView] = useState<'dashboard' | 'inventory' | 'etf'>('dashboard');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'inventory' | 'etf' | 'dca'>('dashboard');
 
   const [editingStockId, setEditingStockId] = useState<string | null>(null);
   const [editShares, setEditShares] = useState<number>(0);
@@ -1100,7 +1101,7 @@ export default function App() {
 
       {/* Navigation Tabs (切換儀表板、庫存股分析、ETF分析三個獨立頁面) */}
       <div className="bg-white border-b border-slate-200 sticky top-[73px] z-20 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-6 sm:space-x-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-6 sm:space-x-8 overflow-x-auto whitespace-nowrap">
           <button
             onClick={() => setCurrentView('dashboard')}
             className={`py-4 px-1 border-b-2 font-black text-xs sm:text-sm flex items-center gap-2 transition-all cursor-pointer ${
@@ -1133,6 +1134,17 @@ export default function App() {
           >
             <TrendingUp className="w-4 h-4" />
             <span>3. ETF 分析工具</span>
+          </button>
+          <button
+            onClick={() => setCurrentView('dca')}
+            className={`py-4 px-1 border-b-2 font-black text-xs sm:text-sm flex items-center gap-2 transition-all cursor-pointer ${
+              currentView === 'dca'
+                ? 'border-indigo-600 text-indigo-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <PiggyBank className="w-4 h-4" />
+            <span>4. 分批進場計畫</span>
           </button>
         </div>
       </div>
@@ -1826,6 +1838,16 @@ export default function App() {
               onRemoveObservedStock={handleRemoveStock}
               onUpdateStockName={handleUpdateStockName}
               onResetStockName={handleResetStockName}
+            />
+          </div>
+        )}
+
+        {currentView === 'dca' && (
+          <div className="animate-fade-in">
+            <DcaPlanner
+              stocks={stocks}
+              twiiIndex={globalIndices['^TWII']?.price ?? null}
+              onNotify={(message, type) => setToast({ id: `dca-${Date.now()}`, message, type })}
             />
           </div>
         )}
