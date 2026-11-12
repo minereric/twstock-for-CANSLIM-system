@@ -4,7 +4,12 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { getInitialStockData, tickStockPrice, computeIndicators, updateEtfDetails, generateHistoricalCandles } from './utils/stockUtils';
+import { computeIndicators, applyQuote, makeSkeletonStock, DEFAULT_PORTFOLIO } from './utils/stockUtils';
+import type { RiskTagKind } from './utils/riskEngine';
+import { fetchQuotes, fetchHistory, fetchInfo, loadPortfolio, saveWatch, removeWatch, saveHoldings, removeHolding, loadOfficial, loadSyncStatus, setUserTag, deleteUserTag } from './services/data';
+import { setOfficialData, setMarketCandles } from './utils/officialStore';
+import { isMarketOpen } from './utils/marketHours';
+import { exportPortfolioXlsx } from './utils/exportPortfolio';
 import { Stock, Candle, AlertRule, AlertLog, MarketState, IndicatorType, AlertCondition, GlobalIndex } from './types';
 import PortfolioStats from './components/PortfolioStats';
 import StockList from './components/StockList';
@@ -68,306 +73,279 @@ const defaultRules = (stocks: Stock[]): AlertRule[] => {
   ];
 };
 
+/** 兩段式確認按鈕：第一次點擊進入「確定？」狀態，3 秒內再點一次才執行（避免誤觸；不使用會被瀏覽器阻擋的 confirm()） */
+function ConfirmButton({ label, confirmLabel, onConfirm, danger, title }: { label: string; confirmLabel: string; onConfirm: () => void; danger?: boolean; title?: string }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      title={title}
+      onClick={() => { if (armed) { setArmed(false); onConfirm(); } else setArmed(true); }}
+      className={`font-bold text-[10px] px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1 border ${
+        armed
+          ? 'bg-rose-600 text-white border-rose-600'
+          : danger
+            ? 'text-rose-700 hover:bg-rose-50 border-rose-200'
+            : 'text-amber-700 hover:bg-amber-50 border-amber-200'
+      }`}
+    >
+      {armed ? confirmLabel : label}
+    </button>
+  );
+}
+
 export default function App() {
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<string>('2330'); // Default to TSMC
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [logs, setLogs] = useState<AlertLog[]>([]);
+  // 大盤資訊一律來自 TWSE/Yahoo 即時指數（^TWII），不再有任何模擬值
   const [market, setMarket] = useState<MarketState>({
-    index: 22841.5,
-    change: 142.3,
-    changePercent: 0.62,
-    volume: 3824, // NT$ billions
+    index: 0,
+    change: 0,
+    changePercent: 0,
+    volume: 0,
     status: 'OPEN',
     simulationSpeed: 'paused'
   });
-  const [marketBias, setMarketBias] = useState<number>(0); // -1 (bearish), 0 (sideways), 1 (bullish)
   const [isCopied, setIsCopied] = useState<boolean>(false);
   const [toast, setToast] = useState<{ id: string; message: string; type: 'buy' | 'sell' | 'neutral' } | null>(null);
 
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [syncSource, setSyncSource] = useState<string>("Simulated Local Data");
+  const [syncSource, setSyncSource] = useState<string>("尚未連線");
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [globalIndices, setGlobalIndices] = useState<Record<string, GlobalIndex>>({});
+  const [quoteMeta, setQuoteMeta] = useState({ liveCount: 0, totalCount: 0, stale: false });
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [bootState, setBootState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [bootError, setBootError] = useState<string>('');
+  const [officialStatus, setOfficialStatus] = useState<{ dataset: string; ran_at: string }[]>([]);
+  const [officialVersion, setOfficialVersion] = useState(0); // 官方資料或歷史 K 線更新時遞增，觸發風險／CAN SLIM 重算
 
-  const syncStockPrices = async (currentStocksList?: Stock[]) => {
+  const stocksRef = useRef<Stock[]>([]);
+  stocksRef.current = stocks;
+  const rulesRef = useRef<AlertRule[]>([]);
+  rulesRef.current = rules;
+  const syncInFlight = useRef(false);
+  const prevStocksRef = useRef<Stock[]>([]);
+
+  const notify = (message: string, type: 'buy' | 'sell' | 'neutral' = 'neutral') =>
+    setToast({ id: `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, message, type });
+
+  /** 取得最新報價並合併進各股（同一天更新最後一根 K，新交易日新增一根）。自動輪詢與「更新報價」按鈕共用。 */
+  const syncStockPrices = async () => {
+    if (syncInFlight.current) return;
+    const ids = stocksRef.current.map(s => s.id).filter(Boolean);
+    if (ids.length === 0) return;
+    syncInFlight.current = true;
     setIsSyncing(true);
     try {
-      const activeList = currentStocksList || stocks;
-      const symbolsQuery = activeList.map(s => s.id).filter(Boolean).join(',');
-      const res = await fetch(`/api/stocks${symbolsQuery ? `?symbols=${encodeURIComponent(symbolsQuery)}` : ''}`);
-      if (!res.ok) {
-        throw new Error(`Server returned status ${res.status}`);
+      const r = await fetchQuotes(ids);
+      setSyncSource(r.source || 'TWSE');
+      setLastSyncTime(new Date().toLocaleTimeString('zh-TW', { hour12: false }));
+      setQuoteMeta({ liveCount: r.liveCount, totalCount: r.totalCount, stale: r.liveCount < r.totalCount });
+      setSyncError(null);
+
+      const idx = r.indices as Record<string, GlobalIndex & { isLive?: boolean }>;
+      setGlobalIndices(idx);
+      const twii = idx['^TWII'];
+      if (twii && twii.price > 0) {
+        setMarket(prev => ({ ...prev, index: twii.price, change: twii.change, changePercent: twii.changePercent }));
       }
-      const result = await res.json();
-      if (result.success) {
-        setSyncSource(result.source);
-        setLastSyncTime(new Date().toLocaleTimeString('zh-TW', { hour12: false }));
-
-        if (result.indices) {
-          setGlobalIndices(result.indices);
-          
-          // Also update the local TAIEX index if ^TWII exists
-          const twii = result.indices['^TWII'];
-          if (twii) {
-            setMarket(prev => ({
-              ...prev,
-              index: twii.price,
-              change: twii.change,
-              changePercent: twii.changePercent
-            }));
-          }
-        }
-
-        if (result.data) {
-          setStocks(prevStocks => {
-            const listToUse = prevStocks.length > 0 ? prevStocks : (currentStocksList || []);
-            if (listToUse.length === 0) return listToUse;
-
-            const updatedList = listToUse.map(s => {
-              const apiData = result.data[s.id];
-              if (apiData) {
-                const newPrice = apiData.price;
-                const newChange = apiData.changePercent;
-                const newPrevClose = apiData.prevClose;
-                const newVolume = apiData.volume;
-
-                let updatedCandles = s.candleHistory ? [...s.candleHistory] : [];
-                if (updatedCandles.length > 0) {
-                  const lastCandle = updatedCandles[updatedCandles.length - 1];
-                  const updatedLastCandle = {
-                    ...lastCandle,
-                    close: newPrice,
-                    high: Math.max(lastCandle.high, newPrice),
-                    low: Math.min(lastCandle.low, newPrice),
-                    volume: newVolume
-                  };
-                  updatedCandles[updatedCandles.length - 1] = updatedLastCandle;
-                } else {
-                  updatedCandles = generateHistoricalCandles(newPrice, 30);
-                }
-
-                const newIndicators = computeIndicators(updatedCandles);
-
-                return {
-                  ...s,
-                  price: newPrice,
-                  change: newChange,
-                  prevClose: newPrevClose,
-                  volume: newVolume,
-                  candleHistory: updatedCandles,
-                  history: updatedCandles.map(c => c.close),
-                  indicators: newIndicators
-                };
-              }
-              return s;
-            });
-
-            return updatedList.map(s => updateEtfDetails(s, updatedList));
-          });
-        }
-      }
+      setStocks(cur => cur.map(s => {
+        const q = r.quotes[s.id];
+        return q ? applyQuote(s, q) : s;
+      }));
     } catch (err) {
-      console.error('Failed to sync stock and index quotes:', err);
+      console.error('Failed to sync quotes:', err);
+      setSyncError(err instanceof Error ? err.message : '報價更新失敗');
+      setQuoteMeta(m => ({ ...m, stale: true }));
     } finally {
+      syncInFlight.current = false;
       setIsSyncing(false);
     }
   };
 
-  // Initialize data from LocalStorage or default generators
-  useEffect(() => {
+  /** 載入 1 年日 K（Yahoo），並套用到各股。可針對部分代號（例如剛新增的標的）。 */
+  const loadHistoryFor = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    const { data } = await fetchHistory(ids);
+    if (data['0050']) setMarketCandles(data['0050']);
+    setStocks(cur => cur.map(s => {
+      const candles = data[s.id];
+      if (!candles || candles.length === 0) return s.quoteStatus === 'loading' ? { ...s, quoteStatus: 'error' } : s;
+      const base: Stock = { ...s, candleHistory: candles, history: candles.map(c => c.close), indicators: computeIndicators(candles) };
+      if (s.price > 0) {
+        return applyQuote(base, { price: s.price, changePercent: s.change, prevClose: s.prevClose, volume: s.volume, isLive: s.quoteStatus === 'live', asOf: s.quoteAsOf });
+      }
+      const last = candles[candles.length - 1];
+      const prev = candles.length > 1 ? candles[candles.length - 2].close : last.close;
+      return { ...base, price: last.close, prevClose: prev, change: prev > 0 ? Number((((last.close - prev) / prev) * 100).toFixed(2)) : 0, volume: last.volume, quoteStatus: 'stale' };
+    }));
+    setOfficialVersion(v => v + 1);
+  };
+
+  /** 載入官方基本面／集保／三大法人／風險標籤（Supabase 資料表） */
+  const refreshOfficial = async (ids: string[]) => {
     try {
-      const storedStocks = localStorage.getItem('tw_stock_obs_stocks');
-      const storedRules = localStorage.getItem('tw_stock_obs_rules');
-      const storedLogs = localStorage.getItem('tw_stock_obs_logs');
-      const storedMarket = localStorage.getItem('tw_stock_obs_market');
-      const storedCustomNames = localStorage.getItem('tw_stock_custom_names');
-      const customNamesMap: Record<string, string> = storedCustomNames ? JSON.parse(storedCustomNames) : {};
-
-      let initialStocks: Stock[] = storedStocks ? JSON.parse(storedStocks) : getInitialStockData();
-
-      // Ensure 00927 (群益半導體收益) is present
-      const has00927 = initialStocks.some(s => s.id === '00927');
-      if (!has00927) {
-        const defaultList = getInitialStockData();
-        const def00927 = defaultList.find(s => s.id === '00927');
-        if (def00927) {
-          initialStocks.push(def00927);
-        }
-      }
-
-      // Auto-correct any "台股 00927" or "00927" without proper name to "群益半導體收益"
-      // Also apply custom names overrides and lookup names in TAIWAN_STOCKS_DATABASE
-      initialStocks = initialStocks.map(s => {
-        let name = s.name;
-        let customName = s.customName;
-
-        if (customNamesMap[s.id]) {
-          name = customNamesMap[s.id];
-          customName = customNamesMap[s.id];
-        } else if (s.id === '00927' && (!name || name === '台股 00927' || name === '00927')) {
-          name = '群益半導體收益';
-        } else if (name.startsWith('台股 ')) {
-          const match = TAIWAN_STOCKS_DATABASE.find(item => item.id.toUpperCase() === s.id.toUpperCase());
-          if (match) {
-            name = match.name;
-          }
-        }
-
-        return { ...s, name, customName };
-      });
-
-      setStocks(initialStocks);
-
-      let initialRules: AlertRule[] = storedRules ? JSON.parse(storedRules) : defaultRules(initialStocks);
-      initialRules = initialRules.map(r => {
-        const matchedStock = initialStocks.find(s => s.id === r.stockId);
-        if (matchedStock && matchedStock.name) {
-          return { ...r, stockName: matchedStock.name };
-        }
-        return r;
-      });
-      setRules(initialRules);
-
-      const initialLogs = storedLogs ? JSON.parse(storedLogs) : [];
-      setLogs(initialLogs);
-
-      if (storedMarket) {
-        setMarket(JSON.parse(storedMarket));
-      }
-
-      // Sync live stock quotes on initial load
-      syncStockPrices(initialStocks);
+      const [o, st] = await Promise.all([loadOfficial(ids), loadSyncStatus().catch(() => [])]);
+      setOfficialData({ fundamentals: o.fundamentals, chip: o.chip, inst: o.inst, tags: o.tags });
+      setOfficialStatus(st);
+      setOfficialVersion(v => v + 1);
     } catch (e) {
-      console.warn('Failed to parse local storage, loading defaults:', e);
-      const initialStocks = getInitialStockData();
-      setStocks(initialStocks);
-      setRules(defaultRules(initialStocks));
-      syncStockPrices(initialStocks);
+      console.warn('官方資料載入失敗：', e);
     }
-  }, []);
+  };
 
-  // Sync state changes to localStorage
-  useEffect(() => {
-    if (stocks.length > 0) {
-      localStorage.setItem('tw_stock_obs_stocks', JSON.stringify(stocks));
+  /** 首次登入且資料庫完全沒有資料時，匯入本機舊資料或內建預設清單（只做一次） */
+  const seedPortfolio = async () => {
+    let watch: { stock_id: string; custom_name: string | null; note: string | null }[] = [];
+    let holdings: { stock_id: string; shares: number; cost: number }[] = [];
+    try {
+      const raw = localStorage.getItem('tw_stock_obs_stocks');
+      const names: Record<string, string> = JSON.parse(localStorage.getItem('tw_stock_custom_names') || '{}');
+      if (raw) {
+        const old: Stock[] = JSON.parse(raw);
+        watch = old.filter(o => o.isObserved !== false || o.shares > 0).map(o => ({ stock_id: o.id, custom_name: names[o.id] ?? o.customName ?? null, note: null }));
+        holdings = old.filter(o => o.shares > 0).map(o => ({ stock_id: o.id, shares: o.shares, cost: o.cost }));
+      }
+    } catch { /* 無舊資料 */ }
+    if (watch.length === 0) {
+      watch = DEFAULT_PORTFOLIO.map(d => ({ stock_id: d.id, custom_name: null, note: null }));
+      holdings = DEFAULT_PORTFOLIO.filter(d => d.shares > 0).map(d => ({ stock_id: d.id, shares: d.shares, cost: d.cost }));
     }
-  }, [stocks]);
+    await saveWatch(watch);
+    await saveHoldings(holdings);
+    return { watch, holdings };
+  };
 
+  // 啟動：先用瀏覽器暫存的「精簡清單」立刻畫出畫面，再向 Supabase 取得正式資料 → 報價 → 歷史 K 線（平行載入）
   useEffect(() => {
-    localStorage.setItem('tw_stock_obs_rules', JSON.stringify(rules));
-  }, [rules]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const rawRules = localStorage.getItem('tw_stock_obs_rules');
+        const rawLogs = localStorage.getItem('tw_stock_obs_logs');
+        let nameMap: Record<string, string> = {};
+        try {
+          const slim = localStorage.getItem('tw_stock_obs_slim');
+          if (slim) {
+            const arr = JSON.parse(slim) as { id: string; name: string; shares: number; cost: number; isHolding: boolean; isObserved: boolean; customName?: string }[];
+            if (arr.length) setStocks(arr.map(a => makeSkeletonStock(a)));
+          }
+        } catch { /* ignore */ }
 
-  useEffect(() => {
-    localStorage.setItem('tw_stock_obs_logs', JSON.stringify(logs));
-  }, [logs]);
+        let { watch, holdings } = await loadPortfolio();
+        if (watch.length === 0 && holdings.length === 0) {
+          ({ watch, holdings } = await seedPortfolio());
+          notify('已將你的觀察清單與庫存匯入資料庫（之後以資料庫為準，可跨裝置使用）。', 'buy');
+        }
+        localStorage.setItem('tw_stock_obs_dbsynced', '1');
+        localStorage.removeItem('tw_stock_obs_stocks');
+        if (cancelled) return;
 
-  useEffect(() => {
-    localStorage.setItem('tw_stock_obs_market', JSON.stringify(market));
-  }, [market]);
-
-  // Simulation loop
-  useEffect(() => {
-    if (market.simulationSpeed === 'paused' || stocks.length === 0) return;
-
-    const intervalTime = market.simulationSpeed === 'fast' ? 300 : 1500;
-
-    const interval = setInterval(() => {
-      // 1. Select 2-5 random stocks to fluctuate this tick
-      const stocksToTickCount = Math.floor(Math.random() * 4) + 2;
-      const shuffledIndices = Array.from({ length: stocks.length }, (_, i) => i)
-        .sort(() => Math.random() - 0.5);
-      
-      const indicesToTick = shuffledIndices.slice(0, stocksToTickCount);
-
-      setStocks(prevStocks => {
-        const nextStocks = [...prevStocks];
-        const triggeredAlertsThisTick: AlertLog[] = [];
-
-        indicesToTick.forEach(idx => {
-          const oldStock = prevStocks[idx];
-          const newStock = tickStockPrice(oldStock, marketBias);
-          nextStocks[idx] = newStock;
-
-          // 2. Scan Alert Rules for this modified stock
-          const stockRules = rules.filter(r => r.stockId === newStock.id && r.isActive);
-          stockRules.forEach(rule => {
-            const isTriggered = evaluateRule(rule, oldStock, newStock);
-            if (isTriggered) {
-              const currentValue = getIndicatorValue(newStock, rule.indicator);
-              const logEntry: AlertLog = {
-                id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-                stockId: newStock.id,
-                stockName: newStock.name,
-                indicator: rule.indicator,
-                condition: rule.condition,
-                triggerValue: rule.value,
-                currentValue: Number(currentValue.toFixed(2)),
-                timestamp: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
-                isRead: false
-              };
-              triggeredAlertsThisTick.push(logEntry);
-            }
+        const ids = Array.from(new Set([...watch.map(w => w.stock_id), ...holdings.map(h => h.stock_id)]));
+        nameMap = Object.fromEntries(DEFAULT_PORTFOLIO.map(d => [d.id, d.name]));
+        const initial = ids.map(id => {
+          const w = watch.find(x => x.stock_id === id);
+          const h = holdings.find(x => x.stock_id === id);
+          const prevName = stocksRef.current.find(x => x.id === id)?.name;
+          return makeSkeletonStock({
+            id,
+            name: prevName || TAIWAN_STOCKS_DATABASE.find(t => t.id === id)?.name || nameMap[id] || id,
+            customName: w?.custom_name,
+            shares: h?.shares ?? 0,
+            cost: h?.cost ?? 0,
+            isHolding: !!h,
+            isObserved: !!w,
           });
         });
+        setStocks(initial);
+        setRules(rawRules ? JSON.parse(rawRules) : defaultRules(initial));
+        setLogs(rawLogs ? JSON.parse(rawLogs) : []);
 
-        // Handle alerts triggered in this tick sequentially (avoid overlapping audio)
-        if (triggeredAlertsThisTick.length > 0) {
-          setLogs(prevLogs => [triggeredAlertsThisTick[0], ...prevLogs]);
-          
-          const alertType = triggeredAlertsThisTick[0].condition === 'gt' || triggeredAlertsThisTick[0].condition === 'cross_up' ? 'buy' : 'sell';
-          
-          // Sound chime
-          playAlertSound(alertType);
+        const histIds = Array.from(new Set([...ids, '0050']));
+        const histPromise = loadHistoryFor(histIds).catch(e => console.warn('歷史 K 線載入失敗：', e));
+        refreshOfficial(ids);
+        // 報價最快：先出價格，歷史 K 線稍後補上
+        await new Promise(r => setTimeout(r, 0));
+        await syncStockPrices();
+        if (cancelled) return;
+        setBootState('ready');
+        await histPromise;
+      } catch (e) {
+        console.error('啟動失敗：', e);
+        if (!cancelled) {
+          setBootError(e instanceof Error ? e.message : String(e));
+          setBootState('error');
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
-          // Browser Push Notification
-          const triggerLabel = triggeredAlertsThisTick[0].condition === 'gt' || triggeredAlertsThisTick[0].condition === 'cross_up' ? '向上突破' : '跌破';
-          const notificationBody = `台股警報: ${triggeredAlertsThisTick[0].stockName}(${triggeredAlertsThisTick[0].stockId}) 已${triggerLabel}設定值！當前數值: ${triggeredAlertsThisTick[0].currentValue}`;
-          triggerBrowserNotification(`台灣股市觀察警示`, notificationBody);
+  // 精簡清單快取（只存代號／股數／成本，不存 K 線，避免 localStorage 過大造成載入緩慢）
+  useEffect(() => {
+    if (stocks.length === 0) return;
+    try {
+      localStorage.setItem('tw_stock_obs_slim', JSON.stringify(stocks.map(s => ({
+        id: s.id, name: s.name, shares: s.shares, cost: s.cost, isHolding: !!s.isHolding, isObserved: s.isObserved !== false, customName: s.customName,
+      }))));
+    } catch { /* ignore */ }
+  }, [stocks]);
 
-          // On screen flash toast
-          setToast({
-            id: triggeredAlertsThisTick[0].id,
-            message: `${triggeredAlertsThisTick[0].stockName} (${triggeredAlertsThisTick[0].stockId}) 觸發指標警示！`,
-            type: alertType
+  useEffect(() => { if (bootState === 'ready') localStorage.setItem('tw_stock_obs_rules', JSON.stringify(rules)); }, [rules, bootState]);
+  useEffect(() => { if (bootState === 'ready') localStorage.setItem('tw_stock_obs_logs', JSON.stringify(logs)); }, [logs, bootState]);
+
+  // 自動更新：盤中每 10 秒、休市每 5 分鐘；分頁隱藏時暫停，回到分頁立即更新一次
+  useEffect(() => {
+    if (bootState !== 'ready') return;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        if (!document.hidden) await syncStockPrices();
+        schedule();
+      }, isMarketOpen() ? 10_000 : 300_000);
+    };
+    schedule();
+    const onVisible = () => { if (!document.hidden) syncStockPrices(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [bootState]);
+
+  // 價格警示：以「真實報價更新前後」比較觸發（取代舊版模擬跳動時的檢查）
+  useEffect(() => {
+    const prev = prevStocksRef.current;
+    prevStocksRef.current = stocks;
+    if (prev.length === 0) return;
+    const triggered: AlertLog[] = [];
+    stocks.forEach(ns => {
+      const os = prev.find(p => p.id === ns.id);
+      if (!os || os.price <= 0 || ns.price <= 0 || os.price === ns.price) return;
+      rulesRef.current.filter(r => r.stockId === ns.id && r.isActive).forEach(rule => {
+        if (evaluateRule(rule, os, ns)) {
+          triggered.push({
+            id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            stockId: ns.id, stockName: ns.name, indicator: rule.indicator, condition: rule.condition,
+            triggerValue: rule.value, currentValue: Number(getIndicatorValue(ns, rule.indicator).toFixed(2)),
+            timestamp: new Date().toLocaleTimeString('zh-TW', { hour12: false }), isRead: false,
           });
         }
-
-        const stocksForCalculation = nextStocks.map(s => ({ id: s.id, price: s.price, change: s.change }));
-        return nextStocks.map(s => updateEtfDetails(s, stocksForCalculation));
       });
-
-      // 3. Correlate TAIEX index points to general stock movements (especially heavy weights)
-      setMarket(prevMarket => {
-        // Simple weighted calculation mimicking actual indices
-        // TSMC (2330) weight: 30%, Foxconn (2317) weight: 12%, other average percent change: 58%
-        const tsmcStock = stocks.find(s => s.id === '2330');
-        const foxconnStock = stocks.find(s => s.id === '2317');
-        
-        let tsmcChange = tsmcStock ? tsmcStock.change : 0;
-        let foxconnChange = foxconnStock ? foxconnStock.change : 0;
-        
-        // Sum up rest of percent change
-        const restStocks = stocks.filter(s => s.id !== '2330' && s.id !== '2317');
-        const restAvgChange = restStocks.reduce((acc, s) => acc + s.change, 0) / (restStocks.length || 1);
-
-        const compositeChangePercent = (tsmcChange * 0.3) + (foxconnChange * 0.12) + (restAvgChange * 0.58) + (marketBias * 0.05);
-        const changePoints = prevMarket.index * (compositeChangePercent / 100);
-        const nextIndex = prevMarket.index + changePoints;
-
-        return {
-          ...prevMarket,
-          index: Number(nextIndex.toFixed(1)),
-          change: Number(changePoints.toFixed(1)),
-          changePercent: Number(compositeChangePercent.toFixed(2)),
-          volume: prevMarket.volume + Math.round((Math.random() * 40 - 20))
-        };
-      });
-
-    }, intervalTime);
-
-    return () => clearInterval(interval);
-  }, [stocks, rules, market.simulationSpeed, marketBias]);
+    });
+    if (triggered.length > 0) {
+      const t = triggered[0];
+      setLogs(l => [...triggered, ...l]);
+      const up = t.condition === 'gt' || t.condition === 'cross_up';
+      playAlertSound(up ? 'buy' : 'sell');
+      triggerBrowserNotification('台灣股市觀察警示', `台股警報: ${t.stockName}(${t.stockId}) 已${up ? '向上突破' : '跌破'}設定值！當前數值: ${t.currentValue}`);
+      notify(`${t.stockName} (${t.stockId}) 觸發指標警示！`, up ? 'buy' : 'sell');
+    }
+  }, [stocks]);
 
   // Clean toast after timeout
   useEffect(() => {
@@ -487,14 +465,38 @@ export default function App() {
     setLogs([]);
   };
 
-  // Portfolio Updates
-  const handleUpdatePortfolio = (id: string, shares: number, cost: number) => {
-    setStocks(prevStocks => prevStocks.map(s => {
-      if (s.id === id) {
-        return { ...s, shares, cost };
-      }
-      return s;
-    }));
+  // Portfolio Updates（寫入 Supabase；失敗時提示並還原）
+  const handleUpdatePortfolio = async (id: string, shares: number, cost: number) => {
+    const before = stocksRef.current.find(s => s.id === id);
+    setStocks(prev => prev.map(s => s.id === id ? { ...s, shares, cost, isHolding: true } : s));
+    try {
+      await saveHoldings([{ stock_id: id, shares, cost }]);
+    } catch (e) {
+      console.error(e);
+      if (before) setStocks(prev => prev.map(s => s.id === id ? { ...s, shares: before.shares, cost: before.cost, isHolding: before.isHolding } : s));
+      notify(`儲存失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell');
+    }
+  };
+
+  /** 清空：股數與成本歸 0，但這一列保留在庫存明細 */
+  const handleClearHolding = (id: string) => handleUpdatePortfolio(id, 0, 0);
+
+  /** 移除：整列從庫存明細刪除（觀察清單不受影響） */
+  const handleRemoveHolding = async (id: string) => {
+    try {
+      await removeHolding(id);
+      setStocks(prev => prev
+        .map(s => s.id === id ? { ...s, shares: 0, cost: 0, isHolding: false } : s)
+        .filter(s => s.isHolding || s.isObserved !== false));
+      notify('已從庫存明細移除。', 'neutral');
+    } catch (e) {
+      notify(`移除失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell');
+    }
+  };
+
+  const handleExportHoldings = async () => {
+    const r = await exportPortfolioXlsx(stocks);
+    notify(r ? `已匯出 ${r.count} 檔持股（不含股數為 0）：${r.fileName}` : '目前沒有股數大於 0 的持股可匯出。', r ? 'buy' : 'neutral');
   };
 
   // Export JSON (today.json) to Clipboard with strict v3.2 prompts
@@ -538,7 +540,7 @@ export default function App() {
   const [invDropdownOpen, setInvDropdownOpen] = useState(false);
   const [lastAddedHolding, setLastAddedHolding] = useState<{ id: string; name: string; shares: number; cost: number } | null>(null);
 
-  // Auto-match stock code or name when typing in inventory holding adder
+  // 輸入代號或名稱時自動比對（名稱與現價皆來自 TWSE 即時查詢，不使用任何預設價）
   useEffect(() => {
     const q = invInputQuery.trim();
     if (!q) {
@@ -546,486 +548,235 @@ export default function App() {
       setIsSearchingInvOnline(false);
       return;
     }
-
-    // Support inputs like "3293鈊象", "3293 鈊象", "3293", "鈊象", or "00927"
     const codeMatch = q.match(/^([0-9A-Za-z.]+)\s*(.*)$/);
     const parsedCode = codeMatch ? codeMatch[1].toUpperCase() : '';
     const parsedName = codeMatch && codeMatch[2] ? codeMatch[2].trim() : '';
 
-    // 1. Check if already in stocks
-    const inStocks = stocks.find(s => 
-      (parsedCode && s.id.toUpperCase() === parsedCode) ||
-      s.id.toUpperCase() === q.toUpperCase() ||
-      s.name === q ||
-      (parsedName && s.name === parsedName)
+    const inStocks = stocks.find(s =>
+      (parsedCode && s.id.toUpperCase() === parsedCode) || s.id.toUpperCase() === q.toUpperCase() ||
+      s.name === q || (parsedName && s.name === parsedName)
     );
     if (inStocks) {
       setInvMatchedInfo({
-        id: inStocks.id,
-        name: inStocks.name,
-        price: inStocks.price,
-        category: inStocks.etfDetails?.category || '個股',
-        market: inStocks.etfDetails ? 'ETF' : '台股'
+        id: inStocks.id, name: inStocks.name, price: inStocks.price,
+        category: inStocks.etfDetails?.category || '個股', market: inStocks.etfDetails ? 'ETF' : '台股'
       });
-      if (!invCost || invCost === '0') {
-        setInvCost(inStocks.cost > 0 ? inStocks.cost.toString() : inStocks.price.toString());
+      if ((!invCost || invCost === '0') && (inStocks.cost > 0 || inStocks.price > 0)) {
+        setInvCost((inStocks.cost > 0 ? inStocks.cost : inStocks.price).toString());
       }
       return;
     }
 
-    // 2. Check in local TAIWAN_STOCKS_DATABASE
-    const localMatch = TAIWAN_STOCKS_DATABASE.find(s => 
-      (parsedCode && s.id.toUpperCase() === parsedCode) ||
-      s.id.toUpperCase() === q.toUpperCase() ||
-      s.name === q ||
-      (parsedName && s.name === parsedName) ||
-      s.name.includes(q)
+    const localMatch = TAIWAN_STOCKS_DATABASE.find(s =>
+      (parsedCode && s.id.toUpperCase() === parsedCode) || s.id.toUpperCase() === q.toUpperCase() ||
+      s.name === q || (parsedName && s.name === parsedName) || s.name.includes(q)
     );
+    const targetLookup = localMatch ? localMatch.id : (parsedCode || q.toUpperCase());
     if (localMatch) {
-      const defPrice = localMatch.id === '3293' ? 801.0 : (localMatch.id === '2330' ? 2430.0 : 100.0);
-      setInvMatchedInfo({
-        id: localMatch.id,
-        name: localMatch.name,
-        price: defPrice,
-        category: localMatch.category,
-        market: localMatch.market
-      });
-      if (!invCost || invCost === '0') {
-        setInvCost(defPrice.toString());
-      }
-
-      // Fetch live info to update exact price in background
-      fetch(`/api/stock/${encodeURIComponent(localMatch.id)}/info`)
-        .then(res => res.json())
-        .then(data => {
-          if (data && data.success && data.price > 0) {
-            setInvMatchedInfo(prev => (prev && prev.id === localMatch.id ? { ...prev, price: data.price } : prev));
-          }
-        })
-        .catch(() => {});
-      return;
+      setInvMatchedInfo({ id: localMatch.id, name: localMatch.name, price: 0, category: localMatch.category, market: localMatch.market });
     }
-
-    // 3. If code format (>= 3 chars), fetch from online API with debounce
-    const targetLookup = parsedCode || q.toUpperCase();
     if (/^[A-Z0-9.]+$/i.test(targetLookup) && targetLookup.length >= 3) {
-      let isMounted = true;
+      let alive = true;
       setIsSearchingInvOnline(true);
       const timer = setTimeout(async () => {
         try {
-          const res = await fetch(`/api/stock/${encodeURIComponent(targetLookup)}/info`);
-          if (res.ok && isMounted) {
-            const data = await res.json();
-            if (data.success && data.name && !data.name.startsWith('台股 ')) {
-              setInvMatchedInfo({
-                id: targetLookup,
-                name: data.name,
-                price: data.price || 100,
-                category: data.isEtf ? 'ETF' : '個股',
-                market: data.market
-              });
-              if (!invCost || invCost === '0') {
-                setInvCost((data.price || 100).toString());
-              }
-            } else {
-              setInvMatchedInfo(null);
-            }
+          const info = await fetchInfo(targetLookup);
+          if (!alive) return;
+          if (info) {
+            setInvMatchedInfo({ id: info.id, name: info.name, price: info.price || 0, category: info.isEtf ? 'ETF' : '個股', market: info.market });
+            if ((!invCost || invCost === '0') && info.price > 0) setInvCost(info.price.toString());
+          } else if (!localMatch) {
+            setInvMatchedInfo(null);
           }
-        } catch (e) {
-          // ignore
-        } finally {
-          if (isMounted) setIsSearchingInvOnline(false);
-        }
+        } catch { /* ignore */ }
+        finally { if (alive) setIsSearchingInvOnline(false); }
       }, 250);
-
-      return () => {
-        isMounted = false;
-        clearTimeout(timer);
-      };
-    } else {
-      setInvMatchedInfo(null);
+      return () => { alive = false; clearTimeout(timer); };
     }
+    if (!localMatch) setInvMatchedInfo(null);
   }, [invInputQuery, stocks]);
 
-  // Handle adding new inventory holding position with auto-matching and real historical candles
+  /** 建立一檔新標的：同時查名稱、1 年日 K、即時報價；查無代號時回傳 null（不再用隨機價格充數） */
+  const buildStock = async (id: string, nameHint: string, extra: { shares?: number; cost?: number; isHolding?: boolean; isObserved?: boolean; customName?: string | null }): Promise<Stock | null> => {
+    const [info, hist, qs] = await Promise.all([
+      fetchInfo(id).catch(() => null),
+      fetchHistory([id]).catch(() => ({ data: {} as Record<string, import('./types').Candle[]>, failed: [id] })),
+      fetchQuotes([id]).catch(() => null),
+    ]);
+    const candles = hist.data[id] ?? [];
+    const quote = qs?.quotes[id];
+    if (!info && candles.length === 0 && !(quote && quote.price > 0)) return null;
+    let st = makeSkeletonStock({ id, name: info?.name || nameHint || id, ...extra });
+    if (candles.length > 0) st = { ...st, candleHistory: candles, history: candles.map(c => c.close), indicators: computeIndicators(candles) };
+    if (quote && quote.price > 0) st = applyQuote(st, quote);
+    else if (candles.length > 0) {
+      const last = candles[candles.length - 1];
+      const prev = candles.length > 1 ? candles[candles.length - 2].close : last.close;
+      st = { ...st, price: last.close, prevClose: prev, change: prev > 0 ? Number((((last.close - prev) / prev) * 100).toFixed(2)) : 0, volume: last.volume, quoteStatus: 'stale' };
+    } else if (info && info.price > 0) {
+      st = { ...st, price: info.price, prevClose: info.prevClose, quoteStatus: 'stale' };
+    }
+    return st;
+  };
+
+  const parseCodeFromQuery = (raw: string) => {
+    const t = raw.trim();
+    const m = t.match(/^([0-9A-Za-z.]+)/);
+    const code = m ? m[1].toUpperCase() : '';
+    const local = TAIWAN_STOCKS_DATABASE.find(s => (code && s.id.toUpperCase() === code) || s.id.toUpperCase() === t.toUpperCase() || s.name === t);
+    return { id: local ? local.id : (code || t.toUpperCase()), local };
+  };
+
+  // 新增／更新庫存持股（同時加入觀察清單）
   const handleAddNewInventoryHolding = async (idOrQuery: string, shares: number, cost: number, customName?: string) => {
-    const rawTrimmed = idOrQuery.trim();
-    if (!rawTrimmed || shares <= 0 || cost < 0) return;
+    if (!idOrQuery.trim() || shares <= 0 || cost < 0) return;
+    const { id: stockId, local } = parseCodeFromQuery(idOrQuery);
 
-    // Parse code prefix e.g. "3293鈊象" or "3293 鈊象" or "3293"
-    const codeMatch = rawTrimmed.match(/^([0-9A-Za-z.]+)/);
-    const parsedCode = codeMatch ? codeMatch[1].toUpperCase() : '';
-
-    // Check match in database
-    const localMatch = TAIWAN_STOCKS_DATABASE.find(s => 
-      (parsedCode && s.id.toUpperCase() === parsedCode) ||
-      s.id.toUpperCase() === rawTrimmed.toUpperCase() ||
-      s.name === rawTrimmed
-    );
-
-    const stockId = localMatch ? localMatch.id : (parsedCode || rawTrimmed.toUpperCase());
-
-    // 1. Check if stock already exists in stocks
-    const existing = stocks.find(s => s.id === stockId || s.name === rawTrimmed);
+    const existing = stocksRef.current.find(s => s.id === stockId || s.name === idOrQuery.trim());
     if (existing) {
-      handleUpdatePortfolio(existing.id, shares, cost);
-      const updated = stocks.map(s => s.id === existing.id ? { ...s, isObserved: true, shares, cost } : s);
-      setStocks(updated);
+      setStocks(prev => prev.map(s => s.id === existing.id ? { ...s, isObserved: true, isHolding: true, shares, cost } : s));
       try {
-        localStorage.setItem('tw_stock_obs_stocks', JSON.stringify(updated));
-      } catch (e) {}
+        await Promise.all([saveWatch([{ stock_id: existing.id, custom_name: existing.customName ?? null, note: null }]), saveHoldings([{ stock_id: existing.id, shares, cost }])]);
+      } catch (e) { notify(`儲存失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell'); return; }
       setSelectedStockId(existing.id);
-      setLastAddedHolding({
-        id: existing.id,
-        name: existing.name,
-        shares,
-        cost
-      });
-      setToast({
-        id: `toast-${Date.now()}`,
-        message: `🎉 成功更新持股：${existing.name} (${existing.id})，今餘股數: ${shares.toLocaleString()} 股，均價: NT$ ${cost}！儀表板已同步更新！`,
-        type: 'buy'
-      });
-      syncStockPrices(updated);
+      setLastAddedHolding({ id: existing.id, name: existing.name, shares, cost });
+      notify(`已更新持股：${existing.name} (${existing.id})，股數 ${shares.toLocaleString()}，均價 NT$ ${cost}`, 'buy');
       return;
     }
 
-    // 2. New stock! Resolve real name, price and category
-    let targetName = customName?.trim() || localMatch?.name || '';
-    let category: string | undefined = localMatch ? (localMatch.market === 'ETF' ? localMatch.category : undefined) : undefined;
-    let realPrice = localMatch?.id === '3293' ? 801.0 : (cost > 0 ? cost : 100);
-
+    const built = await buildStock(stockId, customName?.trim() || local?.name || '', { shares, cost, isHolding: true, isObserved: true, customName: customName?.trim() || null });
+    if (!built) {
+      notify(`查無代號「${stockId}」，請確認是否為上市／上櫃股票或 ETF。`, 'sell');
+      return;
+    }
     try {
-      const res = await fetch(`/api/stock/${encodeURIComponent(stockId)}/info`);
-      if (res.ok) {
-        const info = await res.json();
-        if (info.success) {
-          if (info.name && !info.name.startsWith('台股 ')) targetName = info.name;
-          if (info.price && info.price > 0) realPrice = info.price;
-          if (info.isEtf) category = 'ETF';
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    if (!targetName) {
-      targetName = stockId === '3293' ? '鈊象' : `台股 ${stockId}`;
-    }
-
-    // 3. Fetch real history / candles
-    let realCandles: Candle[] = [];
-    try {
-      const histRes = await fetch(`/api/stock/${encodeURIComponent(stockId)}/history`);
-      if (histRes.ok) {
-        const histData = await histRes.json();
-        if (histData.success && histData.candles && histData.candles.length > 0) {
-          realCandles = histData.candles;
-        }
-      }
-    } catch (e) {
-      console.warn('History API fetch error:', e);
-    }
-
-    let basePrice = realPrice > 0 ? realPrice : (cost > 0 ? cost : (stockId === '3293' ? 801 : 100));
-    let candleHistory: Candle[] = [];
-
-    if (realCandles.length > 0) {
-      candleHistory = realCandles;
-      basePrice = candleHistory[candleHistory.length - 1].close;
-    } else {
-      candleHistory = generateHistoricalCandles(basePrice, 35);
-    }
-
-    const prevClose = candleHistory.length > 1 ? candleHistory[candleHistory.length - 2].close : basePrice;
-    const latestPrice = candleHistory[candleHistory.length - 1].close;
-    const changePct = prevClose > 0 ? Number((((latestPrice - prevClose) / prevClose) * 100).toFixed(2)) : 0;
-
-    const newStock: Stock = {
-      id: stockId,
-      name: targetName,
-      price: latestPrice,
-      change: changePct,
-      prevClose,
-      volume: candleHistory[candleHistory.length - 1].volume || 25000,
-      shares,
-      cost,
-      isObserved: true,
-      history: candleHistory.map(c => c.close),
-      candleHistory,
-      indicators: computeIndicators(candleHistory)
-    };
-
-    let finalStock = updateEtfDetails(newStock, [newStock, ...stocks]);
-    const updatedStocks = [finalStock, ...stocks];
-    setStocks(updatedStocks);
-    try {
-      localStorage.setItem('tw_stock_obs_stocks', JSON.stringify(updatedStocks));
-    } catch (e) {}
+      await Promise.all([saveWatch([{ stock_id: stockId, custom_name: customName?.trim() || null, note: null }]), saveHoldings([{ stock_id: stockId, shares, cost }])]);
+    } catch (e) { notify(`儲存失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell'); return; }
+    setStocks(prev => [built, ...prev.filter(s => s.id !== stockId)]);
     setSelectedStockId(stockId);
-    setLastAddedHolding({
-      id: stockId,
-      name: targetName,
-      shares,
-      cost
-    });
-
-    setToast({
-      id: `toast-${Date.now()}`,
-      message: `🎉 成功新增持股「${targetName} (${stockId})」！儀表板已同步自動增加該股票的走勢圖、CAN SLIM 突破與各項指標診斷！`,
-      type: 'buy'
-    });
-
-    syncStockPrices(updatedStocks);
+    setLastAddedHolding({ id: stockId, name: built.name, shares, cost });
+    notify(`已新增持股「${built.name} (${stockId})」，並自動加入觀察清單。`, 'buy');
+    refreshOfficial([...stocksRef.current.map(s => s.id), stockId]);
+    loadHistoryFor([stockId]).catch(() => {});
   };
 
   const handleAddInventory = async (e: React.FormEvent) => {
     e.preventDefault();
-    const targetId = invInputMode === 'select'
-      ? invSelectId
-      : (invMatchedInfo?.id || invInputQuery.trim());
+    const targetId = invInputMode === 'select' ? invSelectId : (invMatchedInfo?.id || invInputQuery.trim());
     const targetName = invMatchedInfo?.name || '';
     const sharesNum = Number(invShares);
     const costNum = Number(invCost);
-
     if (!targetId || sharesNum <= 0 || costNum < 0) {
-      setToast({
-        id: `toast-${Date.now()}`,
-        message: `請輸入有效之股票代號、股數與每股平均成本！`,
-        type: 'neutral'
-      });
+      notify('請輸入有效之股票代號、股數與每股平均成本！');
       return;
     }
-
     setIsSubmittingInventory(true);
     try {
       await handleAddNewInventoryHolding(targetId, sharesNum, costNum, targetName);
-      setInvInputQuery('');
-      setInvMatchedInfo(null);
-      setInvSelectId('');
-      setInvShares('');
-      setInvCost('');
-      setInvDropdownOpen(false);
+      setInvInputQuery(''); setInvMatchedInfo(null); setInvSelectId(''); setInvShares(''); setInvCost(''); setInvDropdownOpen(false);
     } finally {
       setIsSubmittingInventory(false);
     }
   };
 
+  // 加入觀察清單
   const handleAddStock = async (id: string, name: string, category?: string) => {
     const cleanId = id.trim().toUpperCase();
     const cleanName = name.trim();
-
-    // If the stock is already in our list, mark isObserved: true
-    const existing = stocks.find(s => s.id === cleanId);
-    if (existing) {
-      const updatedStocks = stocks.map(s => {
-        if (s.id === cleanId) {
-          let updated = { ...s, isObserved: true };
-          if (cleanName && !cleanName.startsWith('台股 ') && cleanName !== s.name) {
-            updated.name = cleanName;
-          }
-          if (!updated.etfDetails) {
-            updated = updateEtfDetails(updated, stocks);
-          }
-          if (category && updated.etfDetails) {
-            updated.etfDetails.category = category;
-          }
-          return updated;
-        }
-        return s;
-      });
-      setStocks(updatedStocks);
-      setToast({
-        id: `toast-${Date.now()}`,
-        message: `股票 ${cleanName} (${cleanId}) 已加入觀察清單！`,
-        type: 'neutral'
-      });
-      syncStockPrices(updatedStocks);
-      return;
-    }
-
-    // Try fetching real history from Yahoo Finance API via server
-    let realCandles: Candle[] = [];
+    const existing = stocksRef.current.find(s => s.id === cleanId);
     try {
-      const histRes = await fetch(`/api/stock/${cleanId}/history`);
-      if (histRes.ok) {
-        const histData = await histRes.json();
-        if (histData.success && histData.candles && histData.candles.length > 0) {
-          realCandles = histData.candles;
-        }
+      if (existing) {
+        setStocks(prev => prev.map(s => s.id === cleanId ? { ...s, isObserved: true } : s));
+        await saveWatch([{ stock_id: cleanId, custom_name: existing.customName ?? null, note: null }]);
+        notify(`${existing.name} (${cleanId}) 已加入觀察清單！`);
+        return;
       }
+      const built = await buildStock(cleanId, cleanName.startsWith('台股 ') ? '' : cleanName, { isObserved: true });
+      if (!built) { notify(`查無代號「${cleanId}」，請確認是否為上市／上櫃股票或 ETF。`, 'sell'); return; }
+      if (category && built.etfDetails) built.etfDetails = { ...built.etfDetails, category };
+      await saveWatch([{ stock_id: cleanId, custom_name: null, note: null }]);
+      setStocks(prev => [built, ...prev.filter(s => s.id !== cleanId)]);
+      setSelectedStockId(cleanId);
+      notify(`已新增 ${built.name} (${cleanId}) 至觀察清單！`);
+      refreshOfficial([...stocksRef.current.map(s => s.id), cleanId]);
+      loadHistoryFor([cleanId]).catch(() => {});
     } catch (e) {
-      console.warn('History API fetch error:', e);
+      notify(`儲存失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell');
     }
-
-    let basePrice = 100;
-    let candleHistory: Candle[] = [];
-
-    if (realCandles.length > 0) {
-      candleHistory = realCandles;
-      basePrice = candleHistory[candleHistory.length - 1].close;
-    } else {
-      basePrice = 50 + Math.random() * 600;
-      candleHistory = generateHistoricalCandles(basePrice, 30);
-    }
-
-    const prevClose = candleHistory.length > 1 ? candleHistory[candleHistory.length - 2].close : basePrice;
-    const latestPrice = candleHistory[candleHistory.length - 1].close;
-    const changePct = prevClose > 0 ? Number((((latestPrice - prevClose) / prevClose) * 100).toFixed(2)) : 0;
-
-    const newStock: Stock = {
-      id: cleanId,
-      name: cleanName,
-      price: latestPrice,
-      change: changePct,
-      prevClose,
-      volume: candleHistory[candleHistory.length - 1].volume || 25000,
-      shares: 0,
-      cost: 0,
-      isObserved: true,
-      history: candleHistory.map(c => c.close),
-      candleHistory,
-      indicators: computeIndicators(candleHistory)
-    };
-
-    let finalStock = updateEtfDetails(newStock, [newStock, ...stocks]);
-    if (!finalStock.etfDetails && (category || cleanId.startsWith('00'))) {
-      const seed = cleanId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-      const isHighYield = category ? category === '高股息' : seed % 2 === 0;
-      finalStock.etfDetails = {
-        category: category || (isHighYield ? '高股息' : '市值型'),
-        fundSize: 50 + (seed % 800),
-        shareholders: 15000 + (seed % 60000) * 8,
-        distributionFreq: isHighYield ? '季配' : '半年配',
-        annualizedYield: isHighYield ? Number((6.5 + (seed % 4) * 0.8).toFixed(2)) : Number((2.8 + (seed % 3) * 0.7).toFixed(2)),
-        nextExDate: '2026-08-15',
-        nextAmount: Number((0.25 + (seed % 5) * 0.15).toFixed(2)),
-        constituents: [
-          { id: '2330', name: '台積電', weight: isHighYield ? 4.2 : 46.5 },
-          { id: '2317', name: '鴻海', weight: isHighYield ? 3.9 : 8.8 },
-          { id: '2382', name: '廣達', weight: isHighYield ? 3.6 : 4.5 },
-          { id: '2303', name: '聯電', weight: isHighYield ? 3.4 : 3.8 },
-          { id: '2356', name: '英業達', weight: isHighYield ? 3.1 : 2.5 }
-        ],
-        dividends: [
-          { exDate: '2026-08-15', amount: Number((0.25 + (seed % 5) * 0.15).toFixed(2)), yield: 2.1 }
-        ],
-        estimatedNav: latestPrice,
-        discountPremium: 0
-      };
-    } else if (category && finalStock.etfDetails) {
-      finalStock.etfDetails.category = category;
-    }
-
-    const updatedStocks = [finalStock, ...stocks];
-    setStocks(updatedStocks);
-    setSelectedStockId(cleanId);
-    setToast({
-      id: `toast-${Date.now()}`,
-      message: `已新增股票/ETF ${cleanName} (${cleanId}) 至觀察清單！`,
-      type: 'neutral'
-    });
-
-    syncStockPrices(updatedStocks);
   };
 
-  const handleRemoveStock = (id: string) => {
-    setStocks(prev => prev.map(s => s.id === id ? { ...s, isObserved: false } : s));
-    setToast({
-      id: `toast-${Date.now()}`,
-      message: `股票已從觀察清單中移除。`,
-      type: 'neutral'
-    });
-    if (selectedStockId === id) {
-      const remaining = stocks.filter(s => s.id !== id && s.isObserved !== false);
-      if (remaining.length > 0) {
-        setSelectedStockId(remaining[0].id);
+  /** 批次加入觀察清單：以空白、逗號或換行分隔多個代號（例如 "2330 2317, 00878"） */
+  const handleBulkAddWatch = async (raw: string) => {
+    const ids = Array.from(new Set(raw.split(/[\s,，、;；]+/).map(x => x.trim().toUpperCase()).filter(Boolean)));
+    if (ids.length === 0) return;
+    let ok = 0; const bad: string[] = [];
+    for (const id of ids) {
+      if (stocksRef.current.some(s => s.id === id && s.isObserved !== false)) continue;
+      const before = stocksRef.current.length;
+      await handleAddStock(id, '');
+      if (stocksRef.current.length > before || stocksRef.current.some(s => s.id === id)) ok++; else bad.push(id);
+    }
+    notify(`批次加入完成：成功 ${ok} 檔${bad.length ? `，查無 ${bad.join('、')}` : ''}。`);
+  };
+
+  const handleSetTag = async (stockId: string, tag: RiskTagKind, enabled: boolean) => {
+    try {
+      if (enabled) await setUserTag(stockId, tag, true);
+      else await setUserTag(stockId, tag, false); // 以 enabled=false 覆寫系統預設，亦可關閉預設標籤
+      await refreshOfficial(stocksRef.current.map(x => x.id));
+    } catch (e) { notify(`標籤更新失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell'); }
+  };
+
+  const handleRemoveStock = async (id: string) => {
+    try {
+      await removeWatch(id);
+      setStocks(prev => prev
+        .map(s => s.id === id ? { ...s, isObserved: false } : s)
+        .filter(s => s.isHolding || s.isObserved !== false));
+      notify('股票已從觀察清單中移除。');
+      if (selectedStockId === id) {
+        const remaining = stocksRef.current.filter(s => s.id !== id && s.isObserved !== false);
+        if (remaining.length > 0) setSelectedStockId(remaining[0].id);
       }
-    }
+    } catch (e) { notify(`移除失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell'); }
   };
 
-  const handleToggleWatch = (id: string) => {
-    setStocks(prev => prev.map(s => s.id === id ? { ...s, isObserved: s.isObserved !== false ? false : true } : s));
-    setToast({
-      id: `toast-${Date.now()}`,
-      message: `已更新觀察狀態！`,
-      type: 'neutral'
-    });
+  const handleToggleWatch = async (id: string) => {
+    const cur = stocksRef.current.find(s => s.id === id);
+    if (!cur) return;
+    const next = cur.isObserved === false;
+    try {
+      if (next) await saveWatch([{ stock_id: id, custom_name: cur.customName ?? null, note: null }]);
+      else await removeWatch(id);
+      setStocks(prev => prev.map(s => s.id === id ? { ...s, isObserved: next } : s));
+      notify('已更新觀察狀態！');
+    } catch (e) { notify(`儲存失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell'); }
   };
 
-  const handleUpdateStockName = (id: string, newName: string) => {
+  const handleUpdateStockName = async (id: string, newName: string) => {
     const cleanId = id.trim().toUpperCase();
     const cleanName = newName.trim();
     if (!cleanName) return;
-
+    const cur = stocksRef.current.find(s => s.id === cleanId);
     try {
-      const stored = localStorage.getItem('tw_stock_custom_names');
-      const customNamesMap: Record<string, string> = stored ? JSON.parse(stored) : {};
-      customNamesMap[cleanId] = cleanName;
-      localStorage.setItem('tw_stock_custom_names', JSON.stringify(customNamesMap));
-    } catch (e) {
-      console.warn('Failed to save custom name to localStorage:', e);
-    }
-
-    setStocks(prev => prev.map(s => {
-      if (s.id === cleanId) {
-        return { ...s, name: cleanName, customName: cleanName };
-      }
-      return s;
-    }));
-
-    setRules(prev => prev.map(r => {
-      if (r.stockId === cleanId) {
-        return { ...r, stockName: cleanName };
-      }
-      return r;
-    }));
-
-    setToast({
-      id: `toast-${Date.now()}`,
-      message: `已更新代號 ${cleanId} 名稱為「${cleanName}」`,
-      type: 'neutral'
-    });
+      if (cur && cur.isObserved !== false) await saveWatch([{ stock_id: cleanId, custom_name: cleanName, note: null }]);
+    } catch (e) { notify(`儲存失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell'); return; }
+    setStocks(prev => prev.map(s => s.id === cleanId ? { ...s, name: cleanName, customName: cleanName } : s));
+    setRules(prev => prev.map(r => r.stockId === cleanId ? { ...r, stockName: cleanName } : r));
+    notify(`已更新代號 ${cleanId} 名稱為「${cleanName}」`);
   };
 
-  const handleResetStockName = (id: string) => {
+  const handleResetStockName = async (id: string) => {
     const cleanId = id.trim().toUpperCase();
-
+    const info = await fetchInfo(cleanId).catch(() => null);
+    const defaultName = info?.name || TAIWAN_STOCKS_DATABASE.find(s => s.id.toUpperCase() === cleanId)?.name || cleanId;
+    const cur = stocksRef.current.find(s => s.id === cleanId);
     try {
-      const stored = localStorage.getItem('tw_stock_custom_names');
-      if (stored) {
-        const customNamesMap: Record<string, string> = JSON.parse(stored);
-        delete customNamesMap[cleanId];
-        localStorage.setItem('tw_stock_custom_names', JSON.stringify(customNamesMap));
-      }
-    } catch (e) {
-      console.warn('Failed to reset custom name in localStorage:', e);
-    }
-
-    const match = TAIWAN_STOCKS_DATABASE.find(s => s.id.toUpperCase() === cleanId);
-    const defaultName = match ? match.name : (cleanId === '00927' ? '群益半導體收益' : `台股 ${cleanId}`);
-
-    setStocks(prev => prev.map(s => {
-      if (s.id === cleanId) {
-        const updated = { ...s, name: defaultName };
-        delete updated.customName;
-        return updated;
-      }
-      return s;
-    }));
-
-    setRules(prev => prev.map(r => {
-      if (r.stockId === cleanId) {
-        return { ...r, stockName: defaultName };
-      }
-      return r;
-    }));
-
-    setToast({
-      id: `toast-${Date.now()}`,
-      message: `已重設代號 ${cleanId} 名稱為預設「${defaultName}」`,
-      type: 'neutral'
-    });
+      if (cur && cur.isObserved !== false) await saveWatch([{ stock_id: cleanId, custom_name: null, note: null }]);
+    } catch (e) { notify(`儲存失敗：${e instanceof Error ? e.message : '資料庫錯誤'}`, 'sell'); return; }
+    setStocks(prev => prev.map(s => { if (s.id !== cleanId) return s; const u = { ...s, name: defaultName }; delete u.customName; return u; }));
+    setRules(prev => prev.map(r => r.stockId === cleanId ? { ...r, stockName: defaultName } : r));
+    notify(`已重設代號 ${cleanId} 名稱為預設「${defaultName}」`);
   };
 
   // Map active rules count per stock ID to show on the stock list table
@@ -1037,6 +788,23 @@ export default function App() {
   }, {} as Record<string, number>);
 
   const selectedStock = stocks.find(s => s.id === selectedStockId);
+
+  if (bootState !== 'ready') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6 text-center">
+        {bootState === 'loading' ? (
+          <span className="text-sm text-slate-400">正在載入您的觀察清單與庫存…</span>
+        ) : (
+          <div className="max-w-sm space-y-3">
+            <p className="text-sm font-bold text-rose-600">資料載入失敗</p>
+            <p className="text-xs text-slate-500 break-words">{bootError}</p>
+            <p className="text-[11px] text-slate-400">免費版 Supabase 專案閒置會自動暫停，請至 Supabase 後台 Restore 後重試。</p>
+            <button onClick={() => window.location.reload()} className="px-4 py-2 bg-indigo-600 text-white text-xs font-black rounded-xl cursor-pointer">重新載入</button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans antialiased pb-12 selection:bg-indigo-100 selection:text-indigo-900">
@@ -1186,21 +954,11 @@ export default function App() {
                                       symbol === '^IXIC' ? '美股那斯達克' :
                                       symbol === '^SOX' ? '美股費城半導體' : '美股道瓊工業';
                   
-                  const price = indexData ? indexData.price : (
-                    symbol === '^TWII' ? market.index : 
-                    symbol === '^GSPC' ? 5430.2 : 
-                    symbol === '^IXIC' ? 17520.1 : 
-                    symbol === '^SOX' ? 5210.8 : 39850.4
-                  );
-                  
-                  const change = indexData ? indexData.change : (
-                    symbol === '^TWII' ? market.change : 0
-                  );
-                  
-                  const changePercent = indexData ? indexData.changePercent : (
-                    symbol === '^TWII' ? market.changePercent : 0
-                  );
-                  
+                  const hasData = !!indexData && indexData.price > 0;
+                  const price = hasData ? indexData!.price : 0;
+                  const change = hasData ? indexData!.change : 0;
+                  const changePercent = hasData ? indexData!.changePercent : 0;
+
                   const isUp = changePercent >= 0;
                   
                   return (
@@ -1211,14 +969,14 @@ export default function App() {
                       </div>
                       <div className="mt-1.5 flex items-baseline justify-between">
                         <span className="text-sm font-black text-slate-900 font-mono tracking-tight">
-                          {price.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
+                          {hasData ? price.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 }) : '—'}
                         </span>
                         <span className={`text-[10px] font-mono font-black flex items-center ${isUp ? 'text-emerald-600' : 'text-rose-600'}`}>
-                          {isUp ? '▲' : '▼'} {Math.abs(changePercent).toFixed(2)}%
+                          {hasData ? `${isUp ? '▲' : '▼'} ${Math.abs(changePercent).toFixed(2)}%` : ''}
                         </span>
                       </div>
                       <div className={`text-[9px] font-mono mt-0.5 flex justify-end ${isUp ? 'text-emerald-500/80' : 'text-rose-500/80'}`}>
-                        {isUp ? '+' : ''}{change.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
+                        {hasData ? `${isUp ? '+' : ''}${change.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : ''}
                       </div>
                     </div>
                   );
@@ -1237,9 +995,12 @@ export default function App() {
                     onSelectStock={setSelectedStockId}
                     rulesCountMap={rulesCountMap}
                     onAddStock={handleAddStock}
+                    onBulkAdd={handleBulkAddWatch}
                     onRemoveStock={handleRemoveStock}
                     onUpdateStockName={handleUpdateStockName}
                     onResetStockName={handleResetStockName}
+                    officialVersion={officialVersion}
+                    onSetTag={handleSetTag}
                   />
                 ) : (
                   <div className="h-64 flex items-center justify-center bg-white rounded-2xl border border-slate-200 shadow-sm">
@@ -1331,10 +1092,10 @@ export default function App() {
               <PortfolioStats
                 stocks={stocks}
                 market={market}
-                onToggleSimulation={() => {}}
-                onSetSpeed={(speed) => setMarket(m => ({ ...m, simulationSpeed: speed }))}
-                onSetMarketBias={setMarketBias}
-                marketBias={marketBias}
+                dataStatus={{
+                  source: syncSource, liveCount: quoteMeta.liveCount, totalCount: quoteMeta.totalCount,
+                  lastSync: lastSyncTime, stale: quoteMeta.stale || !!syncError, marketOpen: isMarketOpen(), official: officialStatus,
+                }}
                 onCopyAIPrompt={handleCopyAIPrompt}
                 isCopied={isCopied}
                 onNavigateToDashboard={(id) => {
@@ -1664,6 +1425,13 @@ export default function App() {
                   <h3 className="font-black text-slate-900 text-sm font-display flex items-center gap-2">
                     <Briefcase className="w-4 h-4 text-indigo-600" />
                     <span>庫存持股明細</span>
+                    <button
+                      onClick={handleExportHoldings}
+                      className="ml-2 text-[10px] font-black px-2.5 py-1 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 cursor-pointer"
+                      title="匯出為 Excel (.xlsx)，不含股數為 0 的股票"
+                    >
+                      匯出 .xlsx
+                    </button>
                   </h3>
                   <p className="text-xs text-slate-500">管理目前持股與平均成本，表頭依序為：今餘股數、現價、平均成本、未實現損益與損益率。</p>
                 </div>
@@ -1683,14 +1451,14 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {stocks.filter(s => s.shares > 0).length === 0 ? (
+                    {stocks.filter(s => s.isHolding).length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-12 text-center text-slate-400 font-medium text-xs">
                           目前無任何庫存持股。請在上方「新增庫存持股」輸入股票代碼 (如 3293 鈊象) 進行新增，或在儀表板點選個股設定持股部位。
                         </td>
                       </tr>
                     ) : (
-                      stocks.filter(s => s.shares > 0).map(stock => {
+                      stocks.filter(s => s.isHolding).map(stock => {
                         const isEditing = editingStockId === stock.id;
                         const pnl = (stock.price - stock.cost) * stock.shares;
                         const pnlPct = stock.cost > 0 ? ((stock.price - stock.cost) / stock.cost) * 100 : 0;
@@ -1781,16 +1549,19 @@ export default function App() {
                                   >
                                     <Edit3 className="w-3 h-3" /> 編輯
                                   </button>
-                                  <button
-                                    onClick={() => {
-                                      if (confirm(`確定清空 ${stock.name} 庫存？`)) {
-                                        handleUpdatePortfolio(stock.id, 0, 0);
-                                      }
-                                    }}
-                                    className="text-rose-600 hover:text-rose-850 hover:bg-rose-50 font-bold text-[10px] px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1 border border-rose-100"
-                                  >
-                                    清空
-                                  </button>
+                                  <ConfirmButton
+                                    label="清空"
+                                    confirmLabel="確定清空？"
+                                    title="股數與成本歸 0，但保留這一列"
+                                    onConfirm={() => { handleClearHolding(stock.id); notify(`已清空 ${stock.name} 股數（保留於明細）`); }}
+                                  />
+                                  <ConfirmButton
+                                    label="移除"
+                                    confirmLabel="確定移除？"
+                                    title="從庫存明細刪除這一列"
+                                    danger
+                                    onConfirm={() => handleRemoveHolding(stock.id)}
+                                  />
                                 </div>
                               )}
                             </td>

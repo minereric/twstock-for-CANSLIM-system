@@ -10,10 +10,10 @@ import { Stock, MarketState } from '../types';
 interface PortfolioStatsProps {
   stocks: Stock[];
   market: MarketState;
-  onToggleSimulation: () => void;
-  onSetSpeed: (speed: 'realtime' | 'fast' | 'paused') => void;
-  onSetMarketBias: (bias: number) => void;
-  marketBias: number; // -1 to 1 representing bearish to bullish
+  dataStatus: {
+    source: string; liveCount: number; totalCount: number; lastSync: string | null; stale: boolean; marketOpen: boolean;
+    official: { dataset: string; ran_at: string }[];
+  };
   onCopyAIPrompt: () => void;
   isCopied: boolean;
   onSelectStock?: (id: string) => void;
@@ -23,10 +23,7 @@ interface PortfolioStatsProps {
 export default function PortfolioStats({
   stocks,
   market,
-  onToggleSimulation,
-  onSetSpeed,
-  onSetMarketBias,
-  marketBias,
+  dataStatus,
   onCopyAIPrompt,
   isCopied,
   onSelectStock,
@@ -69,72 +66,33 @@ export default function PortfolioStats({
           </div>
         </div>
 
-        {/* Simulator Bias & Control Controls */}
+        {/* 資料更新狀態（取代舊的盤勢模擬器：本系統不再產生任何模擬價格） */}
         <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-sm flex flex-col justify-between">
           <div>
-            <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider font-display">盤勢趨勢模擬器</p>
-            <div className="flex items-center gap-1.5 mt-2">
-              <button
-                onClick={() => onSetMarketBias(1.0)}
-                className={`flex-1 py-1 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
-                  marketBias > 0.3 
-                    ? 'bg-emerald-50 text-emerald-600 border-emerald-200 shadow-sm' 
-                    : 'bg-slate-50 text-slate-500 border-slate-200 hover:text-slate-800'
-                }`}
-              >
-                🐂 多頭
-              </button>
-              <button
-                onClick={() => onSetMarketBias(0)}
-                className={`flex-1 py-1 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
-                  marketBias === 0 
-                    ? 'bg-indigo-50 text-indigo-600 border-indigo-200 shadow-sm' 
-                    : 'bg-slate-50 text-slate-500 border-slate-200 hover:text-slate-800'
-                }`}
-              >
-                ⚖️ 震盪
-              </button>
-              <button
-                onClick={() => onSetMarketBias(-1.0)}
-                className={`flex-1 py-1 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
-                  marketBias < -0.3 
-                    ? 'bg-rose-50 text-rose-600 border-rose-200 shadow-sm' 
-                    : 'bg-slate-50 text-slate-500 border-slate-200 hover:text-slate-800'
-                }`}
-              >
-                🐻 空頭
-              </button>
+            <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider font-display">資料更新狀態</p>
+            <div className="mt-2 space-y-1 text-[11px]">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">報價來源</span>
+                <span className={`font-bold ${dataStatus.stale ? 'text-amber-600' : 'text-emerald-600'}`}>{dataStatus.source || '—'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">即時筆數</span>
+                <span className="font-mono font-bold text-slate-700">{dataStatus.liveCount}/{dataStatus.totalCount}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">最後更新</span>
+                <span className="font-mono font-bold text-slate-700">{dataStatus.lastSync ?? '—'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">更新頻率</span>
+                <span className="font-bold text-slate-700">{dataStatus.marketOpen ? '盤中每 10 秒' : '休市每 5 分鐘'}</span>
+              </div>
             </div>
           </div>
-
-          <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
-            <span className="text-xs text-slate-400 font-medium">跳動速度:</span>
-            <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-[10px] font-bold">
-              <button
-                onClick={() => onSetSpeed('paused')}
-                className={`px-2 py-1 rounded transition-all cursor-pointer ${
-                  market.simulationSpeed === 'paused' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                暫停
-              </button>
-              <button
-                onClick={() => onSetSpeed('realtime')}
-                className={`px-2 py-1 rounded transition-all cursor-pointer ${
-                  market.simulationSpeed === 'realtime' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                1.5s
-              </button>
-              <button
-                onClick={() => onSetSpeed('fast')}
-                className={`px-2 py-1 rounded transition-all cursor-pointer ${
-                  market.simulationSpeed === 'fast' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                0.3s
-              </button>
-            </div>
+          <div className="mt-2 pt-2 border-t border-slate-100 text-[10px] text-slate-400 leading-snug">
+            {dataStatus.official.length === 0
+              ? '官方基本面／籌碼資料尚未同步'
+              : dataStatus.official.map((o) => `${({ fundamentals: '基本面', chip: '集保', inst: '法人' } as Record<string, string>)[o.dataset] ?? o.dataset} ${new Date(o.ran_at).toLocaleDateString('zh-TW')}`).join('｜')}
           </div>
         </div>
 

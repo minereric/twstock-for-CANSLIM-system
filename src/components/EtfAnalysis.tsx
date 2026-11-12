@@ -13,7 +13,7 @@ import {
   Square, Settings, Eye, EyeOff, Check, AlertCircle, ChevronDown, ChevronUp, Scale,
   Bell, TrendingUp, Zap, Target, Edit2, ExternalLink, RefreshCw, Search, X
 } from 'lucide-react';
-import { getChipStatus } from '../utils/stockUtils';
+import { fetchEtfList, fetchInfo } from '../services/data';
 import StockSearchAutocomplete from './StockSearchAutocomplete';
 import { TAIWAN_STOCKS_DATABASE } from '../data/taiwanStocks';
 
@@ -73,14 +73,9 @@ export default function EtfAnalysis({
   const loadTwseIndicators = async () => {
     setIsLoadingTwse(true);
     try {
-      const res = await fetch('/api/etf/indicators');
-      if (res.ok) {
-        const json = await res.json();
-        if (json.success && json.data) {
-          setTwseIndicators(json.data);
-          setLastTwseUpdated(new Date().toLocaleTimeString('zh-TW', { hour12: false }));
-        }
-      }
+      const list = await fetchEtfList();
+      setTwseIndicators(list as any);
+      setLastTwseUpdated(new Date().toLocaleTimeString('zh-TW', { hour12: false }));
     } catch (err) {
       console.warn('Failed to load TWSE indicators:', err);
     } finally {
@@ -427,13 +422,8 @@ export default function EtfAnalysis({
         targetName = match.name;
       } else {
         try {
-          const res = await fetch(`/api/stock/${cleanCode}/info`);
-          if (res.ok) {
-            const info = await res.json();
-            if (info.success && info.name && !info.name.startsWith('台股 ')) {
-              targetName = info.name;
-            }
-          }
+          const info = await fetchInfo(cleanCode);
+          if (info?.name) targetName = info.name;
         } catch (err) {}
       }
     }
@@ -613,10 +603,15 @@ export default function EtfAnalysis({
                   <span>全市場 ETF 盤中即時淨值與折溢價揭示系統</span>
                 </h3>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  本系統直連 <strong>臺灣證券交易所 (TWSE) ETF即時盤中淨值揭示專區</strong>，精準推算即時市價與預估淨值價差。<br />
+                  資料直接取自 <strong>臺灣證券交易所 (TWSE) ETF 即時預估淨值揭示</strong>；折溢價 =（市價 − 預估淨值）÷ 預估淨值，以官方揭示值為準，非本系統推算。<br />
                   <span className="text-emerald-300 font-bold">🟢 折價買進機會：</span>市價低於預估淨值，具備實質資產保護與安全邊際；
                   <span className="text-rose-300 font-bold ml-2">🔴 溢價追高警戒：</span>市價高於預估淨值，收斂時面臨跌價修正風險。
                 </p>
+                <ul className="text-[11px] text-slate-400 leading-relaxed list-disc pl-4 space-y-0.5">
+                  <li><b className="text-slate-300">槓桿／反向型（代號尾碼 L／R）</b>：淨值每日重設，折溢價僅反映當下市價與預估淨值，不代表長期報酬；持有多日有複利損耗。</li>
+                  <li><b className="text-slate-300">主動式（尾碼 A）</b>：預估淨值依經理人最新持股估算，盤中偏差可能比被動型大。</li>
+                  <li><b className="text-slate-300">海外成分／債券型</b>：海外市場休市或債券淨值更新頻率低時，預估淨值可能落後，折溢價請審慎解讀。</li>
+                </ul>
               </div>
 
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 shrink-0">
@@ -892,6 +887,14 @@ export default function EtfAnalysis({
                             <span className="bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-lg text-xs">
                               {item.id}
                             </span>
+                            {(item as any).kind && (item as any).kind !== 'standard' && (
+                              <span
+                                className="ml-1 text-[9px] font-black px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 align-middle"
+                                title={({ leveraged: '槓桿型：追蹤指數單日報酬的 2 倍，淨值每日重設，長期持有會有複利損耗', inverse: '反向型：追蹤指數單日報酬的反向，淨值每日重設，長期持有會有複利損耗', active: '主動式：經理人主動操作，盤中預估淨值依持股即時估算，折溢價可能較大' } as Record<string, string>)[(item as any).kind]}
+                              >
+                                {({ leveraged: '槓桿', inverse: '反向', active: '主動' } as Record<string, string>)[(item as any).kind]}
+                              </span>
+                            )}
                           </td>
 
                           {/* Name + inline edit */}

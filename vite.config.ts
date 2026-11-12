@@ -5,6 +5,9 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // GitHub Pages 會把網站放在 /<repo名稱>/ 子路徑底下，建置時由 VITE_BASE 指定（例如 /twstock-for-CANSLIM-system/）；
+    // 本機與一般伺服器部署不設定時維持 '/'。
+    base: process.env.VITE_BASE || '/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

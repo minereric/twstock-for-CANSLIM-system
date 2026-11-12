@@ -8,7 +8,8 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { Sparkles, Edit2, Plus, Check, TrendingUp, TrendingDown, DollarSign, Activity, Info, BarChart2, X } from 'lucide-react';
 import { Stock } from '../types';
 import { motion } from 'motion/react';
-import { getChipStatus } from '../utils/stockUtils';
+import RiskPanel from './RiskPanel';
+import type { RiskTagKind } from '../utils/riskEngine';
 
 interface StockDetailSidebarProps {
   stock: Stock;
@@ -16,6 +17,8 @@ interface StockDetailSidebarProps {
   onUpdatePortfolio: (id: string, shares: number, cost: number) => void;
   onUpdateStockName?: (id: string, newName: string) => void;
   onResetStockName?: (id: string) => void;
+  officialVersion?: number;
+  onSetTag?: (stockId: string, tag: RiskTagKind, enabled: boolean) => void | Promise<void>;
 }
 
 export default function StockDetailSidebar({
@@ -23,7 +26,9 @@ export default function StockDetailSidebar({
   stocks = [],
   onUpdatePortfolio,
   onUpdateStockName,
-  onResetStockName
+  onResetStockName,
+  officialVersion = 0,
+  onSetTag = () => {}
 }: StockDetailSidebarProps) {
   const [activeTab, setActiveTab] = useState<'ma' | 'kd_rsi' | 'macd' | 'etf' | 'chip'>('ma');
   const [isEditingHolding, setIsEditingHolding] = useState(false);
@@ -303,158 +308,7 @@ export default function StockDetailSidebar({
     }
 
     if (activeTab === 'chip') {
-      const chip = getChipStatus(stock.id, stock.price);
-      const isEtf = stock.id.startsWith('00');
-      return (
-        <div className="space-y-3.5 text-slate-700">
-          {/* Concentration & Big Holders */}
-          <div className="grid grid-cols-2 gap-3.5">
-            <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-2.5">
-              <span className="text-[10px] text-slate-400 font-bold block mb-1">千張大戶持股比</span>
-              <div className="flex items-baseline gap-1">
-                <span className="text-sm font-black text-indigo-700 font-mono">{chip.bigPlayersRatio}%</span>
-                <span className="text-[9px] text-slate-400 font-medium">籌碼集中度</span>
-              </div>
-              <div className="w-full bg-slate-200 h-1 rounded-full mt-1.5 overflow-hidden">
-                <div className="bg-indigo-600 h-1 rounded-full" style={{ width: `${chip.bigPlayersRatio}%` }} />
-              </div>
-            </div>
-            <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-2.5">
-              <span className="text-[10px] text-slate-400 font-bold block mb-1">籌碼集中度</span>
-              <div className="text-[10px] space-y-0.5 font-mono">
-                <div className="flex justify-between">
-                  <span>1日集中度:</span>
-                  <span className={chip.concentration1d >= 0 ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
-                    {chip.concentration1d >= 0 ? '+' : ''}{chip.concentration1d}%
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span>5日集中度:</span>
-                  <span className={chip.concentration5d >= 0 ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
-                    {chip.concentration5d >= 0 ? '+' : ''}{chip.concentration5d}%
-                  </span>
-                </div>
-                <div className="flex justify-between text-[9px] text-slate-400">
-                  <span>10日集中度:</span>
-                  <span>{chip.concentration10d >= 0 ? '+' : ''}{chip.concentration10d}%</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Institutional Net buys */}
-          <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-3.5">
-            <span className="text-[10px] text-slate-400 font-bold block mb-2">三大法人 & 主力買賣超 (張)</span>
-            <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-[11px] font-medium">
-              <div className="flex justify-between border-b border-slate-100 pb-1">
-                <span className="text-slate-500">主力買賣超:</span>
-                <span className={`font-mono font-bold ${chip.mainForceBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                  {chip.mainForceBuy >= 0 ? '+' : ''}{chip.mainForceBuy.toLocaleString()}
-                </span>
-              </div>
-              <div className="flex justify-between border-b border-slate-100 pb-1">
-                <span className="text-slate-500">外資買賣超:</span>
-                <span className={`font-mono font-bold ${chip.foreignNetBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                  {chip.foreignNetBuy >= 0 ? '+' : ''}{chip.foreignNetBuy.toLocaleString()}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">投信買賣超:</span>
-                <span className={`font-mono font-bold ${chip.trustNetBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                  {chip.trustNetBuy >= 0 ? '+' : ''}{chip.trustNetBuy.toLocaleString()}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">自營商買賣超:</span>
-                <span className={`font-mono font-bold ${chip.dealerNetBuy >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                  {chip.dealerNetBuy >= 0 ? '+' : ''}{chip.dealerNetBuy.toLocaleString()}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Margin Trading */}
-          <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-2.5 flex justify-between text-[11px] font-medium">
-            <div className="flex-1 flex justify-between pr-3 border-r border-slate-200/60">
-              <span className="text-slate-500">融資餘額變化:</span>
-              <span className={`font-mono font-bold ${chip.marginBalanceChange >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                {chip.marginBalanceChange >= 0 ? '+' : ''}{chip.marginBalanceChange.toLocaleString()} 張
-              </span>
-            </div>
-            <div className="flex-1 flex justify-between pl-3">
-              <span className="text-slate-500">融券餘額變化:</span>
-              <span className={`font-mono font-bold ${chip.shortBalanceChange >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                {chip.shortBalanceChange >= 0 ? '+' : ''}{chip.shortBalanceChange.toLocaleString()} 張
-              </span>
-            </div>
-          </div>
-
-          {/* Branch transactions */}
-          <div className="border border-slate-200/60 rounded-xl overflow-hidden text-[10px]">
-            <div className="bg-slate-100/80 px-2.5 py-1 border-b border-slate-200/60 flex justify-between items-center text-[10px] text-slate-500 font-bold">
-              <span>今日主力分點進出排行</span>
-              <span className="font-mono text-[9px]">NET</span>
-            </div>
-            <table className="w-full text-left border-collapse bg-white font-medium">
-              <thead>
-                <tr className="border-b border-slate-100 bg-slate-50 text-slate-400 font-bold">
-                  <th className="py-1 px-2.5">分點名稱</th>
-                  <th className="py-1 px-2 text-right">買張</th>
-                  <th className="py-1 px-2 text-right">賣張</th>
-                  <th className="py-1 px-2.5 text-right">買賣超</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 font-mono">
-                {chip.branchTransactions.map((bt, idx) => (
-                  <tr key={idx} className="hover:bg-slate-50/50">
-                    <td className="py-1 px-2.5 font-sans text-slate-700">{bt.branch}</td>
-                    <td className="py-1 px-2 text-right text-slate-500">{bt.buyVol}</td>
-                    <td className="py-1 px-2 text-right text-slate-500">{bt.sellVol}</td>
-                    <td className={`py-1 px-2.5 text-right font-bold ${bt.net >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {bt.net >= 0 ? '+' : ''}{bt.net}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Financial summary */}
-          {!isEtf && (
-            <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-3.5">
-              <span className="text-[10px] text-slate-400 font-bold block mb-2">財報摘要</span>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10.5px] font-medium font-mono">
-                <div className="flex justify-between">
-                  <span className="text-slate-500 font-sans">營收年增率 (YoY):</span>
-                  <span className={chip.financialSummary.revenueYoY >= 0 ? 'text-emerald-600 font-bold' : 'text-rose-600'}>
-                    {chip.financialSummary.revenueYoY}%
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500 font-sans">每股盈餘 (EPS):</span>
-                  <span className="text-slate-800 font-bold">NT$ {chip.financialSummary.eps}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500 font-sans">毛利率:</span>
-                  <span className="text-slate-800 font-bold">{chip.financialSummary.grossMargin}%</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500 font-sans">本益比:</span>
-                  <span className="text-slate-800 font-bold">{chip.financialSummary.peRatio} 倍</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500 font-sans">營業利益率:</span>
-                  <span className="text-slate-800 font-bold">{chip.financialSummary.operatingMargin}%</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500 font-sans">股價淨值比:</span>
-                  <span className="text-slate-800 font-bold">{chip.financialSummary.pbRatio} 倍</span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      );
+      return <RiskPanel stock={stock} version={officialVersion} onSetTag={onSetTag} />;
     }
 
     return null;
