@@ -1,4 +1,4 @@
-# Supabase 免費專案連續約 7 天無活動會被自動暫停；每週 ping 兩次資料庫 REST 端點以保持運作（零成本）。
+# Supabase 免費專案連續約 7 天無活動會被自動暫停；每週一、四呼叫 rpc/keepalive（只回傳 ok、不讀任何資料表）以保持運作（零成本）。
 # 需在 GitHub → Settings → Secrets and variables → Actions → Variables 設定：
 #   VITE_SUPABASE_URL、VITE_SUPABASE_ANON_KEY（皆為公開可見值，非 secret key）
 name: Supabase keep-alive

@@ -3,13 +3,15 @@
  * ?job=fundamentals  公司基本面：產業別、月營收年增率、EPS、董監持股比例（每日）
  * ?job=chip          集保戶股權分散：千張大戶持股比例（每週，保存歷史快照以比較週變化）
  * ?job=inst          三大法人買賣超（每日，TWSE T86）
+ * ?job=finmind_fin  FinMind：單季財報（EPS／營收／毛利／營業利益）與月營收歷史（每日；免 Token 可用，若設定 FINMIND_TOKEN 則帶入以提高額度）
+ * ?job=finmind_inst 三大法人買賣超補上櫃股（TWSE T86 沒有上櫃）
  * 節流：同一 job 在 MIN_GAP 內重複呼叫會直接略過（避免被濫用）。
  * 寫入使用平台自動注入的 SUPABASE_SERVICE_ROLE_KEY（只存在於 Edge Function 環境，不在前端／repo）。
  */
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const SB_URL = Deno.env.get('SUPABASE_URL')!;
 const SB_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const MIN_GAP_MS: Record<string, number> = { fundamentals: 30 * 60e3, chip: 30 * 60e3, inst: 20 * 60e3 };
+const MIN_GAP_MS: Record<string, number> = { fundamentals: 30 * 60e3, chip: 30 * 60e3, inst: 20 * 60e3, finmind_fin: 6 * 3600e3, finmind_inst: 20 * 60e3 };
 
 const DEFAULT_SYMBOLS = [
   '2356', '2885', '3481', '1432', '2330', '2317', '2382', '2303', '6770', '2344', '2313', '1605', '2481',
@@ -250,14 +252,103 @@ async function jobInst() {
   return { rows: out.length, detail: `days=${got}` };
 }
 
+/* ---------------- FinMind（補足官方彙總表沒有的歷史資料） ---------------- */
+const FM = 'https://api.finmindtrade.com/api/v4/data';
+const FM_TOKEN = Deno.env.get('FINMIND_TOKEN') ?? '';
+const isEtfId = (id: string) => /^00\d{2,4}[A-Z]?$/.test(id);
+const ymd = (d: Date) => d.toISOString().slice(0, 10);
+
+async function fmGet(dataset: string, id: string, start: string): Promise<Record<string, any>[]> {
+  const url = `${FM}?dataset=${dataset}&data_id=${encodeURIComponent(id)}&start_date=${start}`;
+  const r = await fetch(url, { headers: FM_TOKEN ? { Authorization: `Bearer ${FM_TOKEN}` } : {}, signal: AbortSignal.timeout(20000) });
+  if (r.status === 402 || r.status === 429) throw new Error('FinMind 額度已用完（HTTP ' + r.status + '），稍後再試');
+  if (!r.ok) throw new Error(`FinMind ${dataset} ${id} HTTP ${r.status}`);
+  const j = await r.json();
+  if (j.status !== 200) throw new Error(`FinMind ${dataset} ${id}: ${j.msg}`);
+  return (j.data ?? []) as Record<string, any>[];
+}
+async function pool<T>(items: T[], n: number, fn: (x: T) => Promise<void>) {
+  let i = 0;
+  await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) await fn(items[i++]); }));
+}
+
+async function jobFinmindFin() {
+  const ids = (await relevantSymbols()).filter((id) => !isEtfId(id));
+  const now = new Date();
+  const finStart = ymd(new Date(now.getTime() - 3 * 365 * 86400e3));
+  const revStart = ymd(new Date(now.getTime() - 27 * 30 * 86400e3));
+  const fin: Record<string, unknown>[] = [];
+  const rev: Record<string, unknown>[] = [];
+  const failed: string[] = [];
+  let quota = '';
+  await pool(ids, 4, async (id) => {
+    if (quota) return;
+    try {
+      const rows = await fmGet('TaiwanStockFinancialStatements', id, finStart);
+      const by = new Map<string, Record<string, number | null>>();
+      for (const r of rows) {
+        if (!['EPS', 'Revenue', 'GrossProfit', 'OperatingIncome'].includes(r.type)) continue;
+        const o = by.get(r.date) ?? {};
+        o[r.type] = typeof r.value === 'number' ? r.value : null;
+        by.set(r.date, o);
+      }
+      for (const [d, o] of by) fin.push({ stock_id: id, period_end: d, revenue: o.Revenue ?? null, gross_profit: o.GrossProfit ?? null, operating_income: o.OperatingIncome ?? null, eps: o.EPS ?? null, fetched_at: now.toISOString() });
+      for (const r of await fmGet('TaiwanStockMonthRevenue', id, revStart)) {
+        if (!r.revenue_year || !r.revenue_month) continue;
+        rev.push({ stock_id: id, ym: `${r.revenue_year}-${String(r.revenue_month).padStart(2, '0')}`, revenue: r.revenue ?? null, fetched_at: now.toISOString() });
+      }
+    } catch (e) {
+      const m = String((e as Error).message);
+      if (m.includes('額度')) quota = m; else failed.push(id);
+    }
+  });
+  if (fin.length === 0 && rev.length === 0) throw new Error(quota || `FinMind 無資料（失敗 ${failed.join(',')}）`);
+  if (fin.length) await sbUpsert('quarterly_financials', fin, 'stock_id,period_end');
+  if (rev.length) await sbUpsert('monthly_revenue', rev, 'stock_id,ym');
+  return { rows: fin.length + rev.length, detail: `fin=${fin.length} rev=${rev.length} symbols=${ids.length}${failed.length ? ` failed=${failed.join(',')}` : ''}${quota ? ` ${quota}` : ''}` };
+}
+
+/** 上櫃（及 T86 查不到）個股的三大法人：外資=外資+外資自營商、自營商=自營商(自行買賣)+避險；單位：股 */
+async function jobFinmindInst() {
+  const ids = (await relevantSymbols()).filter((id) => !isEtfId(id));
+  const mk = new Map<string, string>();
+  try { for (const r of (await sbGet('company_fundamentals?select=stock_id,market')) as { stock_id: string; market: string }[]) mk.set(r.stock_id, r.market); } catch { /* ignore */ }
+  const targets = ids.filter((id) => mk.get(id) !== 'TWSE'); // TWSE 上市股已由 T86 官方資料涵蓋
+  const start = ymd(new Date(Date.now() - 22 * 86400e3));
+  const out: Record<string, unknown>[] = [];
+  let quota = '';
+  await pool(targets, 4, async (id) => {
+    if (quota) return;
+    try {
+      const by = new Map<string, { f: number; t: number; d: number }>();
+      for (const r of await fmGet('TaiwanStockInstitutionalInvestorsBuySell', id, start)) {
+        const net = (Number(r.buy) || 0) - (Number(r.sell) || 0);
+        const o = by.get(r.date) ?? { f: 0, t: 0, d: 0 };
+        if (r.name === 'Foreign_Investor' || r.name === 'Foreign_Dealer_Self') o.f += net;
+        else if (r.name === 'Investment_Trust') o.t += net;
+        else if (r.name === 'Dealer_self' || r.name === 'Dealer_Hedging' || r.name === 'Dealer') o.d += net;
+        by.set(r.date, o);
+      }
+      for (const [d, o] of by) out.push({ stock_id: id, trade_date: d, foreign_net: o.f, trust_net: o.t, dealer_net: o.d });
+    } catch (e) {
+      const m = String((e as Error).message);
+      if (m.includes('額度')) quota = m;
+    }
+  });
+  if (targets.length === 0) return { rows: 0, detail: '無上櫃標的，略過' };
+  if (out.length === 0) throw new Error(quota || 'FinMind 法人無資料');
+  await sbUpsert('institutional_daily', out, 'stock_id,trade_date');
+  return { rows: out.length, detail: `symbols=${targets.length}${quota ? ` ${quota}` : ''}` };
+}
+
 const JOBS: Record<string, () => Promise<{ rows: number; detail: string }>> = {
-  fundamentals: jobFundamentals, chip: jobChip, inst: jobInst,
+  fundamentals: jobFundamentals, chip: jobChip, inst: jobInst, finmind_fin: jobFinmindFin, finmind_inst: jobFinmindInst,
 };
 
 Deno.serve(async (req: Request) => {
   const job = new URL(req.url).searchParams.get('job') ?? '';
   const headers = { 'content-type': 'application/json; charset=utf-8' };
-  if (!JOBS[job]) return new Response(JSON.stringify({ ok: false, error: 'job 必須為 fundamentals | chip | inst' }), { status: 400, headers });
+  if (!JOBS[job]) return new Response(JSON.stringify({ ok: false, error: 'job 必須為 fundamentals | chip | inst | finmind_fin | finmind_inst' }), { status: 400, headers });
   try {
     const last = (await sbGet(`sync_log?select=ran_at&dataset=eq.${job}&ok=eq.true&order=ran_at.desc&limit=1`))[0];
     if (last && Date.now() - new Date(last.ran_at).getTime() < MIN_GAP_MS[job]) {

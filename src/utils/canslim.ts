@@ -2,8 +2,8 @@
  * 依 William J. O'Neil《笑傲股市》CAN SLIM® 七項準則，以「真實資料」計分（0~100）。
  * 資料不足的項目回傳 null（不猜測、不填預設分數），總分只對有資料的項目依權重重新正規化，並回報 coverage。
  *
- *  C 當季盈餘成長（原書：EPS 年增 ≥25%）→ 官方開放資料沒有「單季 EPS 年增率」，改以「最新月營收年增率」作為代理指標
- *  A 年度盈餘成長（原書：連 3 年 ≥25%）→ 官方開放資料無歷年 EPS，本版暫無資料（null）
+ *  C 當季盈餘成長（原書：EPS 年增 ≥25%）→ 單季 EPS 年增（FinMind 單季財報）；無資料時退回月營收年增代理，並加入營收連續性檢核
+ *  A 年度盈餘成長（原書：連 3 年 ≥25%）→ 近四季 EPS 合計 vs 前四季（滾動四季近似）
  *  N 創新高/新產品  → 股價距 52 週高點的幅度（日 K ≥120 根）
  *  S 供需          → 近 50 日「上漲日成交量 ÷ 下跌日成交量」（U/D Volume Ratio）
  *  L 領導股        → 近 3/6/9/12 月加權報酬 相對大盤代理（0050）的超額報酬
@@ -13,6 +13,8 @@
 import type { Candle } from '../types';
 import type { ChipRow, Fundamental, InstRow } from './riskEngine';
 import { isEtfId } from './riskEngine';
+import { computeQuarterTrend, computeRevenueTrend, type MonthlyRev, type QuarterFin } from './fundamentals';
+import { getMonthly, getQuarterly } from './officialStore';
 
 export interface CanSlimResult {
   c: number | null; a: number | null; n: number | null; s: number | null; l: number | null; i: number | null; m: number | null;
@@ -81,6 +83,8 @@ export function computeCanSlim(args: {
   fundamental?: Fundamental | null;
   inst?: InstRow[];
   chip?: ChipRow[];
+  monthly?: MonthlyRev[];
+  quarterly?: QuarterFin[];
   marketCandles?: Candle[];
   modelHint?: unknown;
 }): CanSlimResult {
@@ -89,17 +93,38 @@ export function computeCanSlim(args: {
   const closes = candles.map((c) => c.close);
   const notes: CanSlimResult['notes'] = {};
 
-  // C
+  // C：優先用「單季 EPS 年增」（FinMind 單季財報）；沒有時退回月營收年增作代理，並在說明中標明
+  const qt = etf ? null : computeQuarterTrend(args.quarterly ?? getQuarterly(stockId));
+  const rt = etf ? null : computeRevenueTrend(args.monthly ?? getMonthly(stockId));
   let c: number | null = null;
-  const yoy = num(args.fundamental?.revenue_yoy);
-  if (!etf && yoy !== null) {
-    c = r0(interp(yoy, [[-20, 10], [0, 45], [25, 80], [50, 100]]));
-    notes.c = `最新月營收年增 ${yoy}%（${args.fundamental?.revenue_month ?? ''}；代理指標，非單季EPS）`;
-  } else notes.c = etf ? 'ETF 不適用' : '無營收資料';
+  if (etf) notes.c = 'ETF 不適用（改看淨值與折溢價）';
+  else if (qt && qt.epsYoy !== null) {
+    let sc = interp(qt.epsYoy, [[-20, 10], [0, 40], [25, 80], [50, 100]]);
+    const extra: string[] = [];
+    if (qt.prevEpsYoy !== null && qt.prevEpsYoy >= 25 && qt.epsYoy >= qt.prevEpsYoy) { sc += 5; extra.push('連續加速'); }
+    if (qt.epsYoy >= 25 && qt.revenueYoy !== null && qt.revenueYoy < 0) { sc -= 10; extra.push('營收年增為負，EPS 成長品質存疑'); }
+    c = r0(Math.max(0, Math.min(100, sc)));
+    notes.c = `${qt.latestPeriod} 單季 EPS ${qt.eps}，年增 ${qt.epsYoy}%` + (qt.revenueYoy !== null ? `；單季營收年增 ${qt.revenueYoy}%` : '') + (extra.length ? `（${extra.join('、')}）` : '');
+  } else {
+    const yoy = rt?.latestYoy ?? num(args.fundamental?.revenue_yoy);
+    if (yoy !== null && yoy !== undefined) {
+      c = r0(interp(yoy, [[-20, 10], [0, 45], [25, 80], [50, 100]]));
+      notes.c = `最新月營收年增 ${yoy}%（代理指標；${qt?.epsYoyNote ?? '尚無單季 EPS 年增資料'}）`;
+    } else notes.c = '無財報與營收資料';
+  }
+  // 營收連續性：已連續成長且累計年增為正 → 小幅加分；累計轉負 → 扣分
+  if (c !== null && rt) {
+    if (rt.consecutivePositiveYoy >= 6 && (rt.cum3Yoy ?? 0) > 0) { c = Math.min(100, c + 5); notes.c += `；營收已連續 ${rt.consecutivePositiveYoy} 個月年增`; }
+    else if (rt.cum3Yoy !== null && rt.cum3Yoy < 0) { c = Math.max(0, c - 8); notes.c += `；近3月累計營收年增 ${rt.cum3Yoy}%（轉弱）`; }
+  }
 
-  // A
-  const a: number | null = null;
-  notes.a = '官方開放資料無歷年EPS，暫無資料';
+  // A：近四季 EPS 合計 vs 前四季合計（原書為連續 3 年年度 EPS；官方來源僅取近 3 年，故以滾動四季近似）
+  let a: number | null = null;
+  if (etf) notes.a = 'ETF 不適用';
+  else if (qt && qt.ttmEpsGrowth !== null) {
+    a = r0(interp(qt.ttmEpsGrowth, [[-10, 10], [0, 40], [25, 85], [40, 100]]));
+    notes.a = `近四季 EPS 合計 ${qt.ttmEps}，較前四季成長 ${qt.ttmEpsGrowth}%（滾動四季近似，非完整 3 年）`;
+  } else notes.a = '單季財報不足 8 季或前期 EPS ≤ 0，暫無資料';
 
   // N
   let n: number | null = null;

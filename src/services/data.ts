@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase';
 import { apiFetch } from '../api/http';
 import type { Candle } from '../types';
 import type { ChipRow, Fundamental, InstRow, RiskTag, RiskTagKind } from '../utils/riskEngine';
+import type { MonthlyRev, QuarterFin } from '../utils/fundamentals';
 
 const baseUrl = () => (import.meta.env.VITE_SUPABASE_URL as string).replace(/\/$/, '');
 const fn = (qs: string) => `${baseUrl()}/functions/v1/market-data?${qs}`;
@@ -130,18 +131,22 @@ export async function removeHolding(stockId: string) {
 /* ---------------- 官方資料與風險標籤 ---------------- */
 export async function loadOfficial(ids: string[]) {
   const list = [...new Set(ids)];
-  const [f, c, i, t] = await Promise.all([
+  const [f, c, i, t, mr, qf] = await Promise.all([
     db().from('company_fundamentals').select('*').in('stock_id', list),
     db().from('chip_weekly').select('*').in('stock_id', list).order('data_date', { ascending: false }).limit(list.length * 8),
     db().from('institutional_daily').select('*').in('stock_id', list).order('trade_date', { ascending: false }).limit(list.length * 12),
     db().from('risk_tags').select('stock_id,tag,enabled,note,user_id'),
+    db().from('monthly_revenue').select('stock_id,ym,revenue').in('stock_id', list).order('ym', { ascending: false }).limit(list.length * 30),
+    db().from('quarterly_financials').select('*').in('stock_id', list).order('period_end', { ascending: false }).limit(list.length * 14),
   ]);
-  for (const r of [f, c, i, t]) if (r.error) throw r.error;
+  for (const r of [f, c, i, t, mr, qf]) if (r.error) throw r.error;
   return {
     fundamentals: (f.data ?? []) as Fundamental[],
     chip: (c.data ?? []) as ChipRow[],
     inst: (i.data ?? []) as InstRow[],
     tags: (t.data ?? []) as RiskTag[],
+    monthly: (mr.data ?? []) as MonthlyRev[],
+    quarterly: (qf.data ?? []) as QuarterFin[],
   };
 }
 export async function loadSyncStatus(): Promise<{ dataset: string; ran_at: string; ok: boolean }[]> {

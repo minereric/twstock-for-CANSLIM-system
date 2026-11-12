@@ -193,7 +193,7 @@ export default function App() {
   const refreshOfficial = async (ids: string[]) => {
     try {
       const [o, st] = await Promise.all([loadOfficial(ids), loadSyncStatus().catch(() => [])]);
-      setOfficialData({ fundamentals: o.fundamentals, chip: o.chip, inst: o.inst, tags: o.tags });
+      setOfficialData({ fundamentals: o.fundamentals, chip: o.chip, inst: o.inst, tags: o.tags, monthly: o.monthly, quarterly: o.quarterly });
       setOfficialStatus(st);
       setOfficialVersion(v => v + 1);
     } catch (e) {

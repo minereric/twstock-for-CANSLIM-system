@@ -3,7 +3,8 @@ import { ShieldAlert, ShieldCheck, HelpCircle, Settings2 } from 'lucide-react';
 import type { Stock } from '../types';
 import { computeRisks, mergeTags, DEFAULT_RISK_SETTINGS, type RiskLevel, type RiskSettings, type RiskTagKind } from '../utils/riskEngine';
 import { computeCanSlim } from '../utils/canslim';
-import { getAllTags, getChipRows, getFundamental, getInstRows, getMarketCandles } from '../utils/officialStore';
+import { getAllTags, getChipRows, getFundamental, getInstRows, getMarketCandles, getMonthly, getQuarterly } from '../utils/officialStore';
+import { computeQuarterTrend, computeRevenueTrend, sumInst } from '../utils/fundamentals';
 
 const SETTINGS_KEY = 'tw_risk_settings';
 export function loadRiskSettings(): RiskSettings {
@@ -55,8 +56,10 @@ export default function RiskPanel({ stock, version, onSetTag }: Props) {
   };
 
   const hasTag = (k: RiskTagKind) => tags.some((t) => t.tag === k);
-  const instSorted = [...inst].sort((a, b) => a.trade_date.localeCompare(b.trade_date)).slice(-5);
-  const sum = (key: 'foreign_net' | 'trust_net' | 'dealer_net') => (instSorted.length ? instSorted.reduce((a, r) => a + (Number(r[key]) || 0), 0) : null);
+  const i10 = sumInst(inst, 10);
+  const qt = useMemo(() => computeQuarterTrend(getQuarterly(stock.id)), [stock.id, version]);
+  const rt = useMemo(() => computeRevenueTrend(getMonthly(stock.id)), [stock.id, version]);
+  const sgn = (v: number | null | undefined, d = 1, suf = '%') => (v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(d)}${suf}`);
   const chipSorted = [...chip].sort((a, b) => a.data_date.localeCompare(b.data_date));
   const lastChip = chipSorted[chipSorted.length - 1];
 
@@ -145,7 +148,7 @@ export default function RiskPanel({ stock, version, onSetTag }: Props) {
         </div>
         <p className="text-[9px] text-slate-400 mt-1.5 leading-snug flex gap-1">
           <HelpCircle className="w-3 h-3 shrink-0" />
-          計分只使用真實資料，缺資料的項目不計分（不猜測）。C 以最新月營收年增率作為代理（官方開放資料沒有單季 EPS 年增率）；A 因缺歷年 EPS 暫無資料。分數為輔助判讀，非投資建議。
+          計分只使用真實資料，缺資料的項目不計分（不猜測）。C 以單季 EPS 年增計分（無資料時退回月營收年增代理，並加入營收連續性檢核）；A 以近四季 EPS 合計對前四季成長近似，需 8 季資料。分數為輔助判讀，非投資建議。
         </p>
       </div>
 
@@ -159,10 +162,62 @@ export default function RiskPanel({ stock, version, onSetTag }: Props) {
           <Cell label="月營收月增" value={fundamental?.revenue_mom != null ? `${Number(fundamental.revenue_mom)}%` : '—'} />
           <Cell label={`千張大戶持股${lastChip ? `（${lastChip.data_date}）` : ''}`} value={lastChip ? `${Number(lastChip.big_holder_pct)}%` : '—'} />
           <Cell label="集保股東人數" value={lastChip?.total_holders != null ? Number(lastChip.total_holders).toLocaleString() : '—'} />
-          <Cell label={`外資近${instSorted.length || 5}日(張)`} value={fmtSheets(sum('foreign_net'))} />
-          <Cell label={`投信近${instSorted.length || 5}日(張)`} value={fmtSheets(sum('trust_net'))} />
         </div>
-        <p className="text-[9px] text-slate-300 mt-1">資料：TWSE/TPEx 開放資料、公開資訊觀測站、集保結算所；僅在官方公布後更新。</p>
+
+        <h4 className="text-[11px] font-black text-slate-800 mt-3 mb-1.5">三大法人近 {i10 ? `${i10.days}` : '10'} 個交易日累計（張）</h4>
+        <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+          <Cell label="外資" value={fmtSheets(i10?.foreign)} />
+          <Cell label="投信" value={fmtSheets(i10?.trust)} />
+          <Cell label="自營商" value={fmtSheets(i10?.dealer)} />
+          <Cell label="三大法人合計" value={fmtSheets(i10?.total)} />
+        </div>
+        <p className="text-[9px] text-slate-400 mt-1">
+          {i10 ? `統計 ${i10.from} ～ ${i10.to}，共 ${i10.days} 個交易日${i10.days < 10 ? '（資料尚未累積滿 10 日，以實際天數計）' : ''}。` : '尚無法人資料。'}
+        </p>
+
+        <h4 className="text-[11px] font-black text-slate-800 mt-3 mb-1.5">
+          最新季財報{qt ? `（${qt.latestPeriod}，單季）` : ''}
+        </h4>
+        {qt ? (
+          <>
+            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+              <Cell label="單季 EPS" value={qt.eps == null ? '—' : qt.eps.toFixed(2)} />
+              <Cell label="EPS 年增" value={sgn(qt.epsYoy)} />
+              <Cell label="單季營收年增" value={sgn(qt.revenueYoy)} />
+              <Cell label="毛利率" value={qt.grossMargin == null ? '—' : `${qt.grossMargin}%`} />
+              <Cell label="毛利率較上季" value={sgn(qt.grossMarginQoQ, 1, ' 點')} />
+              <Cell label="營業利益率" value={qt.opMargin == null ? '—' : `${qt.opMargin}%`} />
+              <Cell label="近四季 EPS 合計" value={qt.ttmEps == null ? '—' : qt.ttmEps.toFixed(2)} />
+              <Cell label="較前四季成長" value={sgn(qt.ttmEpsGrowth)} />
+            </div>
+            <p className="text-[9px] text-slate-400 mt-1">
+              {qt.epsYoyNote ? `${qt.epsYoyNote}。` : ''}資料為已入庫的最新一期（財報期末日 {qt.latestPeriod}）；公司尚未公告的新季度不會出現，請以公開資訊觀測站公告為準。
+            </p>
+          </>
+        ) : <p className="text-[10px] text-slate-400">尚無單季財報資料（ETF 不適用）。</p>}
+
+        <h4 className="text-[11px] font-black text-slate-800 mt-3 mb-1.5">營收連續性{rt ? `（${rt.latestYm}）` : ''}</h4>
+        {rt ? (
+          <>
+            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+              <Cell label="連續年增月數" value={`${rt.consecutivePositiveYoy} 個月`} />
+              <Cell label="當月年增／月增" value={`${sgn(rt.latestYoy)}／${sgn(rt.latestMom)}`} />
+              <Cell label="近 3 月累計年增" value={sgn(rt.cum3Yoy)} />
+              <Cell label="近 6 月累計年增" value={sgn(rt.cum6Yoy)} />
+              <Cell label="近 12 月累計年增" value={sgn(rt.cum12Yoy)} />
+              <Cell label="今年累計年增" value={sgn(rt.ytdYoy)} />
+            </div>
+            <div className="flex items-end gap-0.5 h-10 mt-1.5" title="近 12 個月營收年增率">
+              {rt.yoyByMonth.map((m) => {
+                const v = m.yoy;
+                const h = v == null ? 2 : Math.min(100, Math.max(6, Math.abs(v) * 1.5));
+                return <div key={m.ym} title={`${m.ym}：${v == null ? '無資料' : v + '%'}`} className={`flex-1 rounded-sm ${v == null ? 'bg-slate-200' : v >= 0 ? 'bg-emerald-400' : 'bg-rose-400'}`} style={{ height: `${h}%` }} />;
+              })}
+            </div>
+            <p className="text-[9px] text-slate-400 mt-1">月增率受季節性影響大，僅供參考，不作為必要條件。</p>
+          </>
+        ) : <p className="text-[10px] text-slate-400">尚無月營收歷史（ETF 不適用）。</p>}
+        <p className="text-[9px] text-slate-300 mt-1">資料：TWSE/TPEx 開放資料、集保結算所、FinMind（單季財報、月營收歷史、上櫃法人）；僅在公布後更新。</p>
       </div>
     </div>
   );
