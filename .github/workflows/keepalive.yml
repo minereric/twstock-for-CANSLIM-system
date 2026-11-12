@@ -16,5 +16,5 @@ jobs:
           KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
         run: |
           test -n "$URL" && test -n "$KEY" || { echo "請先設定 repository variables"; exit 1; }
-          curl -fsS "$URL/rest/v1/sync_log?select=id&limit=1" -H "apikey: $KEY" -H "Authorization: Bearer $KEY" || \
+          curl -fsS "$URL/rest/v1/sync_log?select=id&limit=1" -H "apikey: $KEY" || \
           curl -fsS "$URL/auth/v1/health" -H "apikey: $KEY"
