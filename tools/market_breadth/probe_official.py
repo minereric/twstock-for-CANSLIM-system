@@ -12,25 +12,39 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 def fetch(url):
+    """Read complete response up to 16 MiB; report HTTP and non-JSON errors clearly."""
     try:
-        with urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0 (TW stock breadth research)"}), timeout=25) as res:
-            raw = res.read(3_000_000)
-            return {"status": res.status, "json": json.loads(raw)}
+        with urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0 (TW stock breadth research)",
+                                            "Accept": "application/json,text/plain,*/*"}), timeout=45) as res:
+            content_type = res.headers.get("Content-Type", "")
+            raw = res.read(16_000_001)
+            if len(raw) > 16_000_000:
+                return {"error": "Response exceeds 16MB safety cap", "status": res.status,
+                        "bytes": len(raw), "contentType": content_type}
+            try:
+                value = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                return {"error": f"{type(exc).__name__}: {exc}",
+                        "status": res.status, "bytes": len(raw),
+                        "contentType": content_type,
+                        "prefix": raw[:100].decode("utf-8", errors="replace")}
+            return {"status": res.status, "json": value,
+                    "bytes": len(raw), "contentType": content_type}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
 
 def brief(obj):
     if "error" in obj:
-        return {"error": obj["error"]}
+        return {k: v for k, v in obj.items() if k != "json"}
     value = obj["json"]
     if isinstance(value, list):
         dates = sorted({str(row.get("Date", row.get("日期", ""))) for row in value if isinstance(row, dict)})
-        return {"http": obj["status"], "format": "list", "rows": len(value),
+        return {"http": obj["status"], "bytes": obj.get("bytes"), "format": "list", "rows": len(value),
                 "fields": list(value[0])[:12] if value and isinstance(value[0], dict) else [],
                 "dates": dates[-3:]}
     if isinstance(value, dict):
         nested = value.get("data", value.get("tables", []))
-        return {"http": obj["status"], "format": "dict",
+        return {"http": obj["status"], "bytes": obj.get("bytes"), "format": "dict",
                 "keys": list(value)[:15], "data_type": type(nested).__name__,
                 "stat": value.get("stat"), "date": value.get("date")}
     return {"http": obj["status"], "format": type(value).__name__}
