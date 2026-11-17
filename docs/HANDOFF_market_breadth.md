@@ -56,13 +56,18 @@
 | 2026-11-17 | ChatGPT | 交接單入庫 | `fe63b7a`；未修改其他檔案 |
 | 2026-11-17 | ChatGPT | A5 程式防護：FinMind 最短 7 秒；HTTP 402/429 停止重試；API status 402 停止 | `b8c9cb9`；程式提交，尚未完成一小時真實額度測試 |
 | 2026-11-17 | ChatGPT | A4 官方資料來源探測程式 | `edf2b76`；本環境 TWSE／TPEx DNS 無法連線；已準備可在 Colab 執行的診斷程式，待真實測試 |
+| 2026-11-17 | ChatGPT | A1 200 交易日完整性修正與離線測試檔 | `ad96ccb`、`67e0a1a`；已新增測試，尚未實際執行 pytest/unittest |
 
 
 ## 6. A4 研究備註與實測方法（2026-11-17）
 
 - 證交所 OpenAPI `exchangeReport/STOCK_DAY_ALL` 提供最新交易日全市場快照，**不能直接指定歷史日期回補**。
 - `www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=YYYYMMDD&stockNo=2330` 是單檔指定月份的歷史資訊，不是指定日期的全市場下載。
-- 上櫃最新快照可先測 `https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes`；歷史按日期的官方 URL、欄位及授權仍待實測。
+- 上櫃最新快照可先測 `https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes`；櫃買中心網站「每日收盤行情」提供日期查詢與 CSV 下載，標示歷史資料自 2007 年起可查，但實際呼叫介面、批量限制及授權仍待實測（https://www.tpex.org.tw/en-us/mainboard/trading/info/pricing.html）。
 - 不要將第三方彙整站點的付費／免費服務誤認為官方原生 API。
 - 在 Colab 開新儲存格執行 `!python /content/twstock-canslim/tools/market_breadth/probe_official.py`，儲存輸出。探測僅五個網路請求，無須 FinMind token；收到 HTTP 200 仍須確認 schema、日期與資料內容。
 - 此次在 ChatGPT 執行容器對 TWSE／TPEx 均發生 DNS 解析失敗，故**並未通過真實資料測試**，暫不對官方歷史批次回補可行性下結論。
+
+### 待執行的離線驗證
+
+在 Colab 克隆 PR 分支後，執行 `!python -m unittest discover -s /content/twstock-canslim/tools/market_breadth -p 'test_*.py' -v`。此測試不需要 FinMind token。未看到實際測試輸出前，不標記為通過。
