@@ -40,36 +40,38 @@ def stock_id(s):
     return bool(re.fullmatch(r"[1-9][0-9]{3}", str(s)))
 
 
-def roc_date(s):
-    s = str(s).strip()
-    if not re.fullmatch(r"\d{7}", s):
-        raise ValueError(f"TWSE date format changed: {s}")
-    return f"{int(s[:3]) + 1911:04d}-{s[3:5]}-{s[5:]}"
-
-
-def twse_snapshot():
+def twse_snapshot(token):
+    """STOCK_DAY_ALL does not expose a guaranteed per-row trade date.
+    Cross-check benchmark 2330 against FinMind before assigning a date.
+    """
     rows = get_json(TWSE)
     if not isinstance(rows, list) or not rows:
         raise RuntimeError("TWSE returned no daily stock rows")
     prices = {}
-    dates = set()
     for row in rows:
         sid = str(row.get("Code", ""))
         if not stock_id(sid):
             continue
         try:
-            date = roc_date(row["Date"])
             close = float(str(row["ClosingPrice"]).replace(",", ""))
             if close <= 0:
                 continue
         except (KeyError, ValueError, TypeError):
             continue
         prices[sid] = close
-        dates.add(date)
-    if len(prices) < 500 or len(dates) != 1:
-        raise RuntimeError("TWSE snapshot incomplete or dates differ")
-    return dates.pop(), prices
-
+    if len(prices) < 500 or "2330" not in prices:
+        raise RuntimeError("TWSE snapshot incomplete")
+    start = (dt.date.today() - dt.timedelta(days=20)).isoformat()
+    sample = finmind_prices("2330", token, start)
+    if sample.empty:
+        raise RuntimeError("Unable to verify TWSE snapshot date")
+    matched = sample.loc[(sample["close"] - prices["2330"]).abs() < 0.005]
+    if matched.empty:
+        raise RuntimeError("TWSE and FinMind benchmark prices do not match; do not publish")
+    trade_date = matched.iloc[-1]["date"]
+    if (dt.date.today() - dt.date.fromisoformat(trade_date)).days > 7:
+        raise RuntimeError("TWSE market data is more than 7 calendar days old")
+    return trade_date, prices
 
 def finmind_prices(sid, token, start_date):
     params = urlencode({"dataset": "TaiwanStockPrice", "data_id": sid, "start_date": start_date})
@@ -204,7 +206,7 @@ def main():
         parser.error("Set FINMIND_API_TOKEN via Colab Secrets")
     if not 0 <= args.max_fetch <= 100 or args.delay < 6:
         parser.error("Safety limits: max-fetch must be 0..100, delay >=6 seconds")
-    trade_date, snapshot = twse_snapshot()
+    trade_date, snapshot = twse_snapshot(token)
     cache_dir = Path(args.cache_dir)
     count, errors = update_cache(cache_dir, token, trade_date, snapshot, args.max_fetch, args.delay, args.start_date)
     result = summarize(cache_dir, trade_date, len(snapshot))
