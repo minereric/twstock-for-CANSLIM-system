@@ -104,3 +104,14 @@
 - 官方 collector 端到端實跑：兩市場成功，輸出維持 `partial`、`breadthAbove200=null`，不可發布；不曾寫入公開市場訊號。未改 CAN SLIM、持股、Supabase、main，未合併 PR。
 - 未完成：Colab 同版重測；約 250 交易日長批次效能／限流；官方普通股名冊、歷史掛牌與停牌分類；官方交易日完整性驗證；SQLite 歷史與正式 200 日計算串接；對外再利用條款確認。A2/A3 目前僅官方蒐集層完成，不能標記整體驗收完成。B1/B2/C1/D1 本次未實作。
 - 執行方法與可續跑的 Colab 指令已補入 `docs/COLAB_MARKET_BREADTH.md`。本紀錄提交 SHA 以包含本段的 GitHub commit 為準（避免將提交前未知 SHA 寫成已驗證）。
+
+### 2026-11-17 13:44（台北）Colab 同版重測完成
+
+- 已重新連接使用者開啟的 Colab `Untitled0.ipynb`，讀取現有輸出；原版 `c3aba90` 的 TWSE MI_INDEX 因錯誤路徑回傳 HTML，而 TPEx 16MB 完整讀取已成功。
+- 透過 `git pull --ff-only origin feat/colab-market-breadth` 更新；Colab 實際輸出的 HEAD：`2f3347985967bd2188939d574407be8ece02d8ef`。
+- 同版離線測試：12 項全部通過（0.229 秒）。
+- 修正後探測：TWSE MI_INDEX HTTP 200、246,887 bytes、`stat=OK,date=20260930`，不再是 HTML。
+- 官方歷史批次四組全部成功：TWSE 2026-09-30／2026-10-01 候選行情 1,087／1,085 筆；TPEx 同日期 877／864 筆；回傳日期均符合請求日期。筆數與容器實測一致。
+- 官方 collector 在 Colab 完整執行成功：資料日均 2026-11-16，TWSE 1,088、TPEx 878 候選代號；輸出 `status=partial,breadthAbove200=null`。SQLite 與 JSON 僅寫入 Colab 的 `/content/market-breadth-validation*` 測試位置。
+- 此輪未讀取 Secrets／Token、未使用 FinMind、未發布市場訊號；不改演算法、持股、main 或合併 PR。
+- **Colab 同版重測已完成**，取代上一節「Colab 分頁不可用」的當時狀態。仍未完成：250 交易日回補效能／限流、普通股與歷史掛牌分類、交易日完整性、正式 200 日計算串接及再利用條款確認。本次四組候選行情成功不代表以上項目已驗收。
