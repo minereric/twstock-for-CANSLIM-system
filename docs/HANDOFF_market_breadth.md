@@ -57,6 +57,7 @@
 | 2026-11-17 | ChatGPT | A5 程式防護：FinMind 最短 7 秒；HTTP 402/429 停止重試；API status 402 停止 | `b8c9cb9`；程式提交，尚未完成一小時真實額度測試 |
 | 2026-11-17 | ChatGPT | A4 官方資料來源探測程式 | `edf2b76`；本環境 TWSE／TPEx DNS 無法連線；已準備可在 Colab 執行的診斷程式，待真實測試 |
 | 2026-11-17 | ChatGPT | A1 200 交易日完整性修正與離線測試檔 | `ad96ccb`、`67e0a1a`；已新增測試，尚未實際執行 pytest/unittest |
+| 2026-11-17 | ChatGPT | 無金鑰 CI 驗證工作流程 | `8bc500b`；新增 read-only GitHub Actions，待首次 workflow 結果 |
 
 
 ## 6. A4 研究備註與實測方法（2026-11-17）
