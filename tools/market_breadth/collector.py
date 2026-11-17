@@ -154,37 +154,60 @@ def update_cache(cache_dir, token, trade_date, snapshot, max_fetch, delay, start
 
 
 def summarize(cache_dir, trade_date, universe_count):
+    """Require the same 200 trading sessions for every eligible stock.
+
+    Benchmark 2330 is a temporary trading-calendar proxy. Once official
+    by-date history has been verified, replace it with the TWSE calendar.
+    """
+    reference_path = cache_dir / "2330.csv"
+    reference = pd.DataFrame(columns=["date", "close"])
+    if reference_path.exists():
+        try:
+            reference = normalized(pd.read_csv(reference_path, dtype={"date": str}))
+        except (KeyError, ValueError):
+            pass
+    calendar = (reference["date"].tail(200).tolist()
+                if len(reference) >= 200 and reference.iloc[-1]["date"] == trade_date else [])
     closes = {}
+    incomplete = 0
     for path in cache_dir.glob("[0-9][0-9][0-9][0-9].csv"):
         try:
             df = normalized(pd.read_csv(path, dtype={"date": str}))
-            if len(df) < 200 or df.iloc[-1]["date"] != trade_date:
+            if len(calendar) != 200 or df.empty or df.iloc[-1]["date"] != trade_date:
+                incomplete += 1
                 continue
-            # Prevent missing trading days from silently counting as full 200-day history.
-            s = df.set_index("date")["close"].astype(float)
-            closes[path.stem] = s
+            indexed = df.set_index("date")["close"].astype(float)
+            # Missing one of the reference trading days invalidates the 200-day SMA.
+            if not set(calendar).issubset(indexed.index):
+                incomplete += 1
+                continue
+            closes[path.stem] = indexed.loc[calendar]
         except (KeyError, ValueError, IndexError):
+            incomplete += 1
             continue
     eligible_count = len(closes)
     coverage = eligible_count / universe_count if universe_count else 0
-    latest_above = sum(s.iloc[-1] > s.tail(200).mean() for s in closes.values())
+    latest_above = sum(s.iloc[-1] > s.mean() for s in closes.values())
     participation = latest_above / eligible_count if eligible_count else None
     status = "ready" if eligible_count >= 500 and coverage >= 0.9 else "partial"
-    warnings = ["FinMind 免費方案未還原權息，除權息可能影響均線判定。", "目前股票池不含歷史下市股票，歷史分析有倖存者偏差。"]
+    warnings = ["FinMind 免費方案未還原權息，除權息可能影響均線判定。",
+                "目前股票池不含歷史下市股票，歷史分析有倖存者偏差。",
+                "目前以台積電 2330 的有效交易日期作為上市市場交易日代理；正式版應使用交易所日曆。"]
+    if not calendar:
+        warnings.insert(0, "缺少 2330 連續 200 個基準交易日，無法確認其他股票日線連續性。")
     if status != "ready":
         warnings.insert(0, "股票樣本不足：這是建置進度，不能解讀為全市場寬度。")
-    out = {
+    return {
         "schemaVersion": 1, "status": status, "market": "TWSE",
         "tradeDate": trade_date, "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "universeCount": universe_count, "eligibleCount": eligible_count,
-        "above200Count": int(latest_above), "coverage": round(coverage, 4),
+        "excludedCachedCount": incomplete, "above200Count": int(latest_above),
+        "coverage": round(coverage, 4),
         "breadthAbove200": round(participation, 6) if participation is not None else None,
         "source": "TWSE STOCK_DAY_ALL + FinMind TaiwanStockPrice (unadjusted)",
-        "method": "Equal-weighted share of eligible TWSE common stocks above 200-observation SMA",
+        "method": "Equal-weighted share above 200-day SMA on a common 200-session calendar",
         "warnings": warnings,
     }
-    return out
-
 
 def publish(payload, token, branch):
     if payload["status"] != "ready":
