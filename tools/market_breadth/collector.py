@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import time
 from urllib.error import HTTPError
+import threading
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -23,6 +24,13 @@ FINMIND = "https://api.finmindtrade.com/api/v4/data"
 TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 REPO = "minereric/twstock-for-CANSLIM-system"
 PUBLIC_PATH = "public/market-breadth/latest.json"
+FINMIND_MIN_GAP = 7.0  # free tier: 600/hour; maintain a margin
+_finmind_lock = threading.Lock()
+_last_finmind_call = 0.0
+
+class FinMindQuotaError(RuntimeError):
+    """Limit reached: stop the entire batch; do not retry."""
+
 
 
 def get_json(url, headers=None, retries=3):
@@ -30,11 +38,25 @@ def get_json(url, headers=None, retries=3):
         try:
             with urlopen(Request(url, headers={"User-Agent": "twstock-market-breadth/1.0", **(headers or {})}), timeout=60) as response:
                 return json.load(response)
-        except (OSError, ValueError, HTTPError):
+        except HTTPError as exc:
+            if exc.code in (402, 429):
+                raise FinMindQuotaError(f"API quota error HTTP {exc.code}") from exc
             if attempt + 1 == retries:
                 raise
-            time.sleep(3 * (attempt + 1))
+        except (OSError, ValueError):
+            if attempt + 1 == retries:
+                raise
+        time.sleep(3 * (attempt + 1))
 
+
+def finmind_pace(delay=FINMIND_MIN_GAP):
+    """Pace every FinMind request, including the snapshot cross-check."""
+    global _last_finmind_call
+    with _finmind_lock:
+        elapsed = time.monotonic() - _last_finmind_call
+        if _last_finmind_call and elapsed < delay:
+            time.sleep(delay - elapsed)
+        _last_finmind_call = time.monotonic()
 
 def stock_id(s):
     return bool(re.fullmatch(r"[1-9][0-9]{3}", str(s)))
@@ -75,9 +97,13 @@ def twse_snapshot(token):
 
 def finmind_prices(sid, token, start_date):
     params = urlencode({"dataset": "TaiwanStockPrice", "data_id": sid, "start_date": start_date})
+    finmind_pace()
     payload = get_json(FINMIND + "?" + params, {"Authorization": "Bearer " + token})
     if payload.get("status") != 200:
-        raise RuntimeError(f"FinMind error for {sid}: {payload.get('msg')}")
+        msg = str(payload.get("msg", ""))
+        if payload.get("status") in (402, 429) or "limit" in msg.lower() or "upper" in msg.lower():
+            raise FinMindQuotaError(f"FinMind quota reached on {sid}")
+        raise RuntimeError(f"FinMind error for {sid}: {msg}")
     rows = payload.get("data") or []
     if not rows:
         raise RuntimeError(f"FinMind returned no prices for {sid}")
@@ -114,12 +140,11 @@ def update_cache(cache_dir, token, trade_date, snapshot, max_fetch, delay, start
                 merged.to_csv(path, index=False)
                 meta.touch()
                 updated += 1
-                time.sleep(delay)
+            except FinMindQuotaError as exc:
+                errors.append(f"{sid}: {type(exc).__name__}")
+                break  # Do not retry or continue fetching after a quota denial.
             except Exception as exc:
                 errors.append(f"{sid}: {type(exc).__name__}")
-                # Rate-limit/permission errors should stop the batch rather than hammer the API.
-                if "rate" in str(exc).lower() or "limit" in str(exc).lower() or "429" in str(exc):
-                    break
         # The official snapshot only fills the latest close; it does not fill skipped days.
         if path.exists():
             old = pd.read_csv(path, dtype={"date": str})
@@ -195,7 +220,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache-dir", default="/content/drive/MyDrive/twstock-market-breadth-cache")
     parser.add_argument("--max-fetch", type=int, default=60)
-    parser.add_argument("--delay", type=float, default=6.5)
+    parser.add_argument("--delay", type=float, default=7.0)
     parser.add_argument("--start-date", default="2024-01-01")
     parser.add_argument("--output", default="/content/tw-market-breadth-result.json")
     parser.add_argument("--publish", action="store_true")
@@ -204,8 +229,10 @@ def main():
     token = os.getenv("FINMIND_API_TOKEN", "")
     if not token:
         parser.error("Set FINMIND_API_TOKEN via Colab Secrets")
-    if not 0 <= args.max_fetch <= 100 or args.delay < 6:
-        parser.error("Safety limits: max-fetch must be 0..100, delay >=6 seconds")
+    if not 0 <= args.max_fetch <= 100 or args.delay < 7:
+        parser.error("Safety limits: max-fetch must be 0..100, delay >=7 seconds")
+    global FINMIND_MIN_GAP
+    FINMIND_MIN_GAP = args.delay
     trade_date, snapshot = twse_snapshot(token)
     cache_dir = Path(args.cache_dir)
     count, errors = update_cache(cache_dir, token, trade_date, snapshot, args.max_fetch, args.delay, args.start_date)
