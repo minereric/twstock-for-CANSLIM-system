@@ -1,0 +1,40 @@
+name: Market Breadth CI (no tokens)
+
+on:
+  pull_request:
+    paths:
+      - 'tools/market_breadth/**'
+      - 'src/components/MarketBreadthPanel.tsx'
+      - 'src/components/ReportGenerator.tsx'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/market-breadth-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python dependencies
+        run: python -m pip install 'pandas>=2.0,<3'
+      - name: Compile and test collector (offline)
+        run: |
+          python -m py_compile tools/market_breadth/collector.py tools/market_breadth/probe_official.py
+          python -m unittest discover -s tools/market_breadth -p 'test_*.py' -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Frontend typecheck and build
+        run: |
+          npm ci
+          npm run lint
+          npm run build
