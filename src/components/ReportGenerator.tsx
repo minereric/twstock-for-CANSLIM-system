@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import MarketBreadthPanel from './MarketBreadthPanel';
 import { 
   Calendar, Sunrise, Sun, Sunset, FileText, Check, Copy, 
   AlertTriangle, TrendingUp, TrendingDown, Info, Coins, 
@@ -225,6 +226,7 @@ export default function ReportGenerator({ stocks, market, globalIndices = {} }: 
 
   return (
     <div id="ai-v32-report-generator" className="space-y-6">
+      <MarketBreadthPanel />
       {/* Header & Report Selector */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
         <div className="absolute top-0 right-0 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl pointer-events-none -mr-20 -mt-20"></div>
