@@ -72,3 +72,12 @@
 ### 待執行的離線驗證
 
 在 Colab 克隆 PR 分支後，執行 `!python -m unittest discover -s /content/twstock-canslim/tools/market_breadth -p 'test_*.py' -v`。此測試不需要 FinMind token。未看到實際測試輸出前，不標記為通過。
+
+### 2026-11-17 Colab A4 真實探測結果（使用者提供）
+
+- GitHub PR 分支 clone 成功（206 objects）。
+- TWSE `STOCK_DAY_ALL`: HTTP 200、1,390 筆，回傳 `Date=1151116`（2026-11-16）；含 `Date,Code,Name,ClosingPrice` 等欄位。**1,390 筆並不等於普通股有效樣本**。
+- TWSE `STOCK_DAY` 台積電 2330：2026/09、2026/10 均 HTTP 200，`stat=OK`，屬單檔月份資料。
+- TWSE `MI_INDEX` 2026-09-30：原版探測程式 `JSONDecodeError`；需核對 Content-Type、回傳開頭及查詢參數，不可當作 API 不可用。
+- TPEx `tpex_mainboard_daily_close_quotes`：原版探測程式以 `read(3_000_000)` 截斷，於約第 2.9MB JSON 解析失敗；不等同伺服器失敗。
+- 2026-11-17 ChatGPT 修補探測程式，改為完整讀取（16MB 安全上限）、回報 response bytes、Content-Type 與非 JSON 前綴；commit `b1fa96d`。**修補版本尚待 Colab 重測。**
