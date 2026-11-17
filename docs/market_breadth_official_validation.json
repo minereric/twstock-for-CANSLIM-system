@@ -1,0 +1,63 @@
+{
+  "testDateTaipei": "2026-11-17",
+  "environment": "ChatGPT execution container, NOT Colab",
+  "offlineTests": 12,
+  "history": [
+    {
+      "market": "twse",
+      "requested": "2026-09-30",
+      "returned": "2026-09-30",
+      "candidates": 1087,
+      "status": "parsed_experimental",
+      "normalizedSha256": "7a2d732b9d667912b33f4445449c317778c3195ae6553be69beb46329bff2cf9"
+    },
+    {
+      "market": "tpex",
+      "requested": "2026-09-30",
+      "returned": "2026-09-30",
+      "candidates": 877,
+      "status": "parsed_experimental",
+      "normalizedSha256": "ab4b75af3ba361d3c4f09abc8b9a400307bf8cd8c437c5f4bbbbb55c6ded0ec6"
+    },
+    {
+      "market": "twse",
+      "requested": "2026-10-01",
+      "returned": "2026-10-01",
+      "candidates": 1085,
+      "status": "parsed_experimental",
+      "normalizedSha256": "a9deaa63ee8ef3ba5cd7c79b4a959a02093bba33569acf3769045cb2ceed3bb8"
+    },
+    {
+      "market": "tpex",
+      "requested": "2026-10-01",
+      "returned": "2026-10-01",
+      "candidates": 864,
+      "status": "parsed_experimental",
+      "normalizedSha256": "bdfa94f126aec714fbabea22a573d7c995c5e55b473054b9f21da8f49e8316ed"
+    }
+  ],
+  "latest": {
+    "schemaVersion": 1,
+    "status": "partial",
+    "source": "TWSE/TPEx official unadjusted",
+    "breadthAbove200": null,
+    "warnings": [
+      "官方行情候選代號尚未完成普通股分類及200交易日覆蓋驗證，不是正式市場寬度。"
+    ],
+    "twse": {
+      "tradeDate": "2026-11-16",
+      "candidateCount": 1088,
+      "status": "partial"
+    },
+    "tpex": {
+      "tradeDate": "2026-11-16",
+      "candidateCount": 878,
+      "status": "partial"
+    }
+  },
+  "limitations": [
+    "Two dates only; 250-session throughput and terms of redistribution not verified",
+    "Candidate four-digit codes are not a verified ordinary-share universe",
+    "Colab tab not available in connected browser; no Colab execution claimed"
+  ]
+}

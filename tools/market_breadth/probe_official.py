@@ -56,7 +56,7 @@ def main():
         "twse_latest": "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
         "twse_stock_september": "https://www.twse.com.tw/exchangeReport/STOCK_DAY?" + urlencode({"response": "json", "date": dates[0], "stockNo": "2330"}),
         "twse_stock_october": "https://www.twse.com.tw/exchangeReport/STOCK_DAY?" + urlencode({"response": "json", "date": dates[1], "stockNo": "2330"}),
-        "twse_index_september": "https://www.twse.com.tw/indicesReport/MI_INDEX?" + urlencode({"response": "json", "date": "20260930", "type": "ALLBUT0999"}),
+        "twse_index_september": "https://www.twse.com.tw/exchangeReport/MI_INDEX?" + urlencode({"response": "json", "date": "20260930", "type": "ALLBUT0999"}),
         "tpex_latest": "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
     }
     out = {key: brief(fetch(url)) for key, url in cases.items()}

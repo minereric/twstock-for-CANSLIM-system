@@ -59,3 +59,19 @@ os.environ['GITHUB_TOKEN'] = userdata.get('GITHUB_TOKEN')
 ## 後續
 
 先完成真實資料核驗、取樣覆蓋率及測試，再擴增歷史寬度序列與六項評分；將市場環境摘要整合進晨／午／收盤報。避免把美股的 Equity Exposure 門檻直接當成台股建議。
+
+## 官方免費來源（2026-11-17 更新）
+
+預設 `collector.py` 現改用官方來源，不讀取 FinMind token。最新候選行情存於 SQLite，TWSE／TPEx 分市場保留；尚未完成普通股分類與歷史覆蓋時只輸出 `partial`，禁止發布正式訊號。
+
+```python
+!git -C /content/twstock-canslim pull --ff-only origin feat/colab-market-breadth
+!python -m unittest discover -s /content/twstock-canslim/tools/market_breadth -p 'test_*.py' -v
+!python /content/twstock-canslim/tools/market_breadth/probe_official.py
+!python /content/twstock-canslim/tools/market_breadth/official.py --dates 2026-09-30 2026-10-01 --db /content/drive/MyDrive/twstock-market-breadth-official.sqlite
+!python /content/twstock-canslim/tools/market_breadth/collector.py
+```
+
+歷史批次每次最多指定 10 個日期，每個日期依序請求兩市場，間隔 7 秒，無自動重試；402/429 即停止。成功日期原子取代，可重跑續接。休市、缺欄位、非 JSON、回傳日期不符都不寫入；失敗不能推定為休市。官方日期批次的回補程序目前僅蒐集候選價格，尚未接上正式 200 日市場寬度計算。
+
+FinMind 免費版補洞必須明確加上 `--source finmind`，沿用既有每次最多 100 檔及至少 7 秒節流。既有指令若未加此參數，現只走官方快照。所有價格未還原權息。不得將四位數代號篩選當作普通股分類；普通股名冊、掛牌／下市與停牌判定仍待加入。

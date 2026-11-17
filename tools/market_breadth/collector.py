@@ -63,37 +63,13 @@ def stock_id(s):
 
 
 def twse_snapshot(token):
-    """STOCK_DAY_ALL does not expose a guaranteed per-row trade date.
-    Cross-check benchmark 2330 against FinMind before assigning a date.
-    """
-    rows = get_json(TWSE)
-    if not isinstance(rows, list) or not rows:
-        raise RuntimeError("TWSE returned no daily stock rows")
-    prices = {}
-    for row in rows:
-        sid = str(row.get("Code", ""))
-        if not stock_id(sid):
-            continue
-        try:
-            close = float(str(row["ClosingPrice"]).replace(",", ""))
-            if close <= 0:
-                continue
-        except (KeyError, ValueError, TypeError):
-            continue
-        prices[sid] = close
-    if len(prices) < 500 or "2330" not in prices:
-        raise RuntimeError("TWSE snapshot incomplete")
-    start = (dt.date.today() - dt.timedelta(days=20)).isoformat()
-    sample = finmind_prices("2330", token, start)
-    if sample.empty:
-        raise RuntimeError("Unable to verify TWSE snapshot date")
-    matched = sample.loc[(sample["close"] - prices["2330"]).abs() < 0.005]
-    if matched.empty:
-        raise RuntimeError("TWSE and FinMind benchmark prices do not match; do not publish")
-    trade_date = matched.iloc[-1]["date"]
-    if (dt.date.today() - dt.date.fromisoformat(trade_date)).days > 7:
-        raise RuntimeError("TWSE market data is more than 7 calendar days old")
-    return trade_date, prices
+    """Use the official row date; never infer a date from matching prices."""
+    from official import snapshot
+    trade_day, values = snapshot(get_json(TWSE), "twse")
+    age = (dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.date.fromisoformat(trade_day)).days
+    if not 0 <= age <= 7 or len(values) < 500 or "2330" not in values:
+        raise RuntimeError("TWSE snapshot stale, future-dated or incomplete")
+    return trade_day, values
 
 def finmind_prices(sid, token, start_date):
     params = urlencode({"dataset": "TaiwanStockPrice", "data_id": sid, "start_date": start_date})
@@ -210,6 +186,8 @@ def summarize(cache_dir, trade_date, universe_count):
     }
 
 def publish(payload, token, branch):
+    if branch in ("main", "master"):
+        raise RuntimeError("Publishing to the default branch is prohibited")
     if payload["status"] != "ready":
         raise RuntimeError("Refusing to publish partial-universe breadth as a market signal")
     if not token:
@@ -242,6 +220,7 @@ def publish(payload, token, branch):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache-dir", default="/content/drive/MyDrive/twstock-market-breadth-cache")
+    parser.add_argument("--source", choices=("official", "finmind"), default="official")
     parser.add_argument("--max-fetch", type=int, default=60)
     parser.add_argument("--delay", type=float, default=7.0)
     parser.add_argument("--start-date", default="2024-01-01")
@@ -249,9 +228,30 @@ def main():
     parser.add_argument("--publish", action="store_true")
     parser.add_argument("--branch", default="feat/colab-market-breadth")
     args = parser.parse_args()
+    if args.source == "official":
+        from official import snapshot, save_batch
+        cache = Path(args.cache_dir)
+        cache.mkdir(parents=True, exist_ok=True)
+        result = {"schemaVersion": 1, "status": "partial", "source": "TWSE/TPEx official unadjusted", "breadthAbove200": None,
+                  "warnings": ["官方行情候選代號尚未完成普通股分類及200交易日覆蓋驗證，不是正式市場寬度。"]}
+        for market, url in (("twse", TWSE), ("tpex", "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes")):
+            try:
+                day, values = snapshot(get_json(url, retries=1), market)
+                age = (dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.date.fromisoformat(day)).days
+                if not 0 <= age <= 7:
+                    raise ValueError("Stale or future official date")
+                save_batch(cache / "official.sqlite", market, day, values)
+                result[market] = {"tradeDate": day, "candidateCount": len(values), "status": "partial"}
+            except Exception as exc:
+                result[market] = {"status": "unverified", "error": type(exc).__name__}
+        Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.publish:
+            raise RuntimeError("Official candidate data is not approved for signal publishing")
+        return
     token = os.getenv("FINMIND_API_TOKEN", "")
-    if not token:
-        parser.error("Set FINMIND_API_TOKEN via Colab Secrets")
+    if args.max_fetch and not token:
+        parser.error("FinMind backfill requires FINMIND_API_TOKEN; use --max-fetch 0 for official-only latest update")
     if not 0 <= args.max_fetch <= 100 or args.delay < 7:
         parser.error("Safety limits: max-fetch must be 0..100, delay >=7 seconds")
     global FINMIND_MIN_GAP

@@ -81,3 +81,26 @@
 - TWSE `MI_INDEX` 2026-09-30：原版探測程式 `JSONDecodeError`；需核對 Content-Type、回傳開頭及查詢參數，不可當作 API 不可用。
 - TPEx `tpex_mainboard_daily_close_quotes`：原版探測程式以 `read(3_000_000)` 截斷，於約第 2.9MB JSON 解析失敗；不等同伺服器失敗。
 - 2026-11-17 ChatGPT 修補探測程式，改為完整讀取（16MB 安全上限）、回報 response bytes、Content-Type 與非 JSON 前綴；commit `b1fa96d`。**修補版本尚待 Colab 重測。**
+
+### 2026-11-17 官方來源修正與執行環境實測（ChatGPT）
+
+本次先讀本交接單，再於 PR #2 功能分支工作。**以下真實請求在 ChatGPT 執行容器完成，不是 Colab。** 已連接 Chrome 中只有對話與「新功能」分頁，無 Colab，因此無法讀取新的筆記本輸出或完成 Colab 重測；舊輸出僅以本文件前述使用者提供紀錄為準。未讀取或輸出任何 token。
+
+- 修正 `probe_official.py`：歷史全市場行情路徑由錯誤的 `/indicesReport/MI_INDEX` 改為 `/exchangeReport/MI_INDEX`。
+- `collector.py` 預設官方免費來源，TWSE／TPEx 最新候選行情以單一 SQLite 保存（鍵為市場／日期／代號）；FinMind 必須明確指定 `--source finmind`。TWSE 日期直接解析官方 `Date`，取消以台積電價格匹配推算日期的 FinMind 請求。
+- 官方最新快照實測：TWSE 1,390 原始筆／1,088 有效候選代號；TPEx 13,843 原始筆／878 有效候選代號。兩市場 `Date=1151116`，即 2026-11-16。TPEx 欄位為 `SecuritiesCompanyCode,Close`，TWSE 為 `Code,ClosingPrice`。代號保留字串；ETF、權證等不能混作普通股。四位數且非零開頭僅作候選篩選，並未完成證券種類分類。
+- 新增 `official.py`：以明確日期批次取得官方歷史行情，逐日核對回傳日期、表格欄位及列寬；缺欄位／日期不符／非 JSON／非正有限價格皆不造值。TPEx 實測 `stat="ok"`、歷史欄位 `代號,收盤`；TWSE 為 `stat="OK"`、`證券代號,收盤價`。
+
+| 市場 | 請求與回傳日期 | 有效候選行情數 | 結果 |
+|---|---|---:|---|
+| TWSE | 2026-09-30 | 1,087 | 成功解析／存入 SQLite |
+| TWSE | 2026-10-01 | 1,085 | 成功解析／存入 SQLite |
+| TPEx | 2026-09-30 | 877 | 成功解析／存入 SQLite |
+| TPEx | 2026-10-01 | 864 | 成功解析／存入 SQLite |
+
+兩市場兩日期的正規化價格雜湊各異，證明測試中回傳內容隨日期不同，而非把最新快照標成歷史日期。完整摘要見 `docs/market_breadth_official_validation.json`。這是端點與蒐集驗證，**不是正式市場寬度分析結果**。
+
+- 離線 `python -m unittest discover -s tools/market_breadth -p 'test_*.py' -v`：12 項通過；涵蓋 200 日缺日、民國／西元日期、混日、錯日、TPEx 欄位、代號與無效價格、重複代號、列寬、SQLite 重跑取代及市場隔離。`py_compile` 與 `git diff --check` 通過。
+- 官方 collector 端到端實跑：兩市場成功，輸出維持 `partial`、`breadthAbove200=null`，不可發布；不曾寫入公開市場訊號。未改 CAN SLIM、持股、Supabase、main，未合併 PR。
+- 未完成：Colab 同版重測；約 250 交易日長批次效能／限流；官方普通股名冊、歷史掛牌與停牌分類；官方交易日完整性驗證；SQLite 歷史與正式 200 日計算串接；對外再利用條款確認。A2/A3 目前僅官方蒐集層完成，不能標記整體驗收完成。B1/B2/C1/D1 本次未實作。
+- 執行方法與可續跑的 Colab 指令已補入 `docs/COLAB_MARKET_BREADTH.md`。本紀錄提交 SHA 以包含本段的 GitHub commit 為準（避免將提交前未知 SHA 寫成已驗證）。
